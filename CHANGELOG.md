@@ -1,4 +1,17 @@
-## 1.3.7
+## 1.4.0
+
+**New Features**
+- Added `getHome({String? country})`: Returns the full YT Music home page as a list of `HomeSection` objects (Top picks, Trending, New releases, Top albums, etc.). Accepts an optional ISO 3166-1 country code (e.g. `"US"`, `"IN"`) or `null` for the default locale. Hits `FEmusic_home`, `FEmusic_new_releases`, and `FEmusic_new_releases_albums` in parallel and follows up to 5 continuation pages.
+- Added `HomeSection.stableTitle`: A locale-independent slug (e.g. `"top_picks"`, `"trending"`, `"new_releases"`) for reliable programmatic section matching regardless of the user's language.
+- Added `reportPlayback({videoId, songDuration, listenedSeconds})`: Sends a watchtime ping to YouTube's servers so listening activity in the app updates the account's recommendation model. Call this when a song finishes or is skipped. Does nothing if the instance is not authenticated.
+- Added `isAuthenticated` getter: Returns `true` when auth cookies have been loaded, indicating `getHome()` will return a personalised feed.
+- `YTMusic` constructor now accepts an optional `apiKey` parameter: `YTMusic(apiKey: '...')`. The singleton pattern has been removed — each `YTMusic()` call creates its own instance.
+
+**Security**
+- Removed hardcoded API key and `secrets.dart` dependency from `yt_music.dart`. The package no longer bundles or references any API key.
+- Added `lib/secrets/secrets.dart` to `.gitignore` to prevent accidental key exposure.
+
+
 
 **Fix**
 - Fixed `searchSongs` and all song parsers returning empty `videoId`: YouTube Music API removed the `playlistItemData` field; now extracting `videoId` via `watchEndpoint`.
