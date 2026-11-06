@@ -96,6 +96,7 @@ class Parser {
 
     return HomeSection(
       title: title,
+      stableTitle: _stableTitle(title),
       contents: rawContents
           .map((item) {
             if (item is! Map) return null;
@@ -225,5 +226,75 @@ class Parser {
           .cast<dynamic>()
           .toList(),
     );
+  }
+
+  // Normalises a localised YT Music shelf title to a stable, locale-independent slug.
+  static String _stableTitle(String raw) {
+    final lower = raw.toLowerCase().trim();
+
+    // Ordered from most-specific to least-specific so a phrase like
+    // "new albums & singles" matches "new_releases" before "top_albums".
+    const knownMappings = <String, String>{
+      // Top picks / Quick picks
+      'top pick': 'top_picks',
+      'quick pick': 'top_picks',
+      'recommended for you': 'recommended',
+      'our picks': 'top_picks',
+
+      // Trending / Charts
+      'trending': 'trending',
+      'chart': 'charts',
+      'top song': 'trending',
+      'top track': 'trending',
+      'hot hit': 'trending',
+
+      // New releases (before individual album/single checks)
+      'new release': 'new_releases',
+      'new album': 'new_releases',
+      'new single': 'new_releases',
+      'latest release': 'new_releases',
+
+      // Albums
+      'top album': 'top_albums',
+      'album': 'top_albums',
+
+      // Singles / EPs
+      'top single': 'top_singles',
+      'single': 'top_singles',
+      ' ep': 'top_singles',
+
+      // Videos
+      'top video': 'top_videos',
+      'music video': 'top_videos',
+      'video': 'top_videos',
+
+      // Personalised / mood
+      'mixed for you': 'mixed_for_you',
+      'mix for you': 'mixed_for_you',
+      'your mix': 'mixed_for_you',
+      'mood': 'moods_and_genres',
+      'genre': 'moods_and_genres',
+      'feel': 'moods_and_genres',
+
+      // Artist / playlist mixes
+      'artist mix': 'artist_mixes',
+      'playlist mix': 'playlist_mixes',
+
+      // Radio / station
+      'radio': 'radio',
+
+      // Podcasts
+      'podcast': 'podcasts',
+      'episode': 'podcasts',
+    };
+
+    for (final entry in knownMappings.entries) {
+      if (lower.contains(entry.key)) return entry.value;
+    }
+
+    // Fallback: convert raw title to snake_case
+    return lower
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
   }
 }

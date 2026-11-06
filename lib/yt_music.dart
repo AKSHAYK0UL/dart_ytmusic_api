@@ -10,37 +10,28 @@ import 'package:dart_ytmusic_api/parsers/playlist_parser.dart';
 import 'package:dart_ytmusic_api/parsers/search_parser.dart';
 import 'package:dart_ytmusic_api/parsers/song_parser.dart';
 import 'package:dart_ytmusic_api/parsers/video_parser.dart';
-import 'package:dart_ytmusic_api/secrets/secrets.dart';
 import 'package:dart_ytmusic_api/types.dart';
 
 import 'package:dart_ytmusic_api/utils/traverse.dart';
 import 'package:http/http.dart' as http;
 
-/// Fallback YouTube Data API v3 key bundled with the package.
-/// Used when the consuming app does not supply its own key via
-/// `YTMusic().initialize(dataApiKey: ...)`.
-///
-/// Replace the value below with your own key from Google Cloud Console.
-/// Keep this file out of public repositories if your key has no restrictions.
-
 class YTMusic {
-  static final YTMusic _instance = YTMusic._internal();
-
-  factory YTMusic() {
-    return _instance;
-  }
-
-  YTMusic._internal() {
+  // Creates a new YTMusic client.
+  // [apiKey] is your YouTube Data API v3 key (from Google Cloud Console).
+  // It is used as a fallback by [getPlaylistVideos] when the fast internal
+  // browse endpoint rejects a non-music YouTube playlist.
+  // You can also supply or override it later via [initialize].
+  YTMusic({String? apiKey}) {
     cookieJar = CookieJar();
     config = {
-      'INNERTUBE_API_KEY': ytDataApiKey,
+       if (apiKey != null && apiKey.isNotEmpty) 'INNERTUBE_API_KEY': apiKey,
       'INNERTUBE_API_VERSION': 'v1',
       'INNERTUBE_CLIENT_NAME': 'WEB_REMIX',
       'INNERTUBE_CLIENT_VERSION': '1.20241104.01.00',
       'INNERTUBE_CONTEXT_CLIENT_NAME': '67',
       'GL': 'US',
       'HL': 'en',
-      'DATA_API_KEY': ytDataApiKey,
+      if (apiKey != null && apiKey.isNotEmpty) 'DATA_API_KEY': apiKey,
     };
     _client = http.Client();
     _baseHeaders = {
@@ -56,13 +47,20 @@ class YTMusic {
   late http.Client _client;
   late Map<String, String> _baseHeaders;
   bool hasInitialized = false;
+  bool _isAuthenticated = false;
   String? ytMusicHomeRawHtml;
+
+  // Returns true if auth cookies have been loaded into the session.
+  // When true, [getHome] returns a personalised feed and [reportPlayback]
+  // will update the account's watch history on Google's servers.
+  bool get isAuthenticated => _isAuthenticated;
 
   /// Initializes the YTMusic instance with provided cookies, geolocation, and language.
   ///
   /// [dataApiKey] is a YouTube Data API v3 key (from Google Cloud Console).
   /// It is used as a fallback by [getPlaylistVideos] if the fast internal browse
   /// endpoint rejects a non-music YouTube playlist.
+  // Supplying it here overrides the key passed to the [YTMusic] constructor.
   Future<YTMusic> initialize({
     String? cookies,
     String? gl,
@@ -86,16 +84,15 @@ class YTMusic {
           );
         } catch (_) {}
       }
+      _isAuthenticated = true;
     }
 
     if (gl != null) config['GL'] = gl;
     if (hl != null) config['HL'] = hl;
 
-    final resolvedKey = (dataApiKey != null && dataApiKey.isNotEmpty)
-        ? dataApiKey
-        : ytDataApiKey;
-    if (resolvedKey.isNotEmpty) {
-      config['DATA_API_KEY'] = resolvedKey;
+    // initialize(dataApiKey:) overrides the constructor key when provided.
+    if (dataApiKey != null && dataApiKey.isNotEmpty) {
+      config['DATA_API_KEY'] = dataApiKey;
     }
 
     hasInitialized = true;
@@ -288,6 +285,82 @@ class YTMusic {
       cookieJar.saveFromResponse(uri, [cookie]);
     } catch (e) {
       //
+    }
+  }
+
+  // Reports a song playback to YouTube Music's servers, which updates the
+  // account's watch history and drives personalised recommendations in [getHome].
+  
+  // Call this once per song, ideally when the song finishes or when the user
+  // skips to the next track.
+  
+  // [videoId]        — the song's YouTube videoId (e.g. `"dQw4w9WgXcQ"`)
+  // [songDuration]   — total duration of the song in seconds
+  // [listenedSeconds] — how many seconds the user actually listened to.
+  //                    Defaults to [songDuration] (full listen).
+  //                    Pass a lower value if the user skipped early.
+  //
+  // Does nothing if the instance is not authenticated (no cookies loaded).
+  // Errors are silently swallowed so a reporting failure never disrupts playback.
+  Future<void> reportPlayback({
+    required String videoId,
+    required int songDuration,
+    int? listenedSeconds,
+  }) async {
+    if (!_isAuthenticated) return;
+
+    final actualListened = listenedSeconds ?? songDuration;
+
+    // Generate a random 16-character content playback nonce (cpn).
+    // YouTube uses this to deduplicate pings — each play session needs a unique one.
+    const cpnChars =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    final random = DateTime.now().microsecondsSinceEpoch;
+    final cpn = List.generate(16, (i) {
+      // Simple deterministic shuffle — good enough for a nonce
+      return cpnChars[(random ~/ (1 << i)) % cpnChars.length];
+    }).join();
+
+    final uri =
+        Uri.parse('https://www.youtube.com/api/stats/watchtime').replace(
+      queryParameters: {
+        'ns': 'yt',
+        'el': 'detailpage',
+        'cpn': cpn,
+        'docid': videoId,
+        'ver': '2',
+        'cmt': actualListened.toString(),
+        'len': songDuration.toString(),
+        'st': '0',
+        'et': actualListened.toString(),
+        'state': 'playing',
+        'cl': config['PAGE_CL'] ?? '',
+        'ei': config['VISITOR_DATA'] ?? '',
+        'c': config['INNERTUBE_CLIENT_NAME'] ?? 'WEB_REMIX',
+        'cver': config['INNERTUBE_CLIENT_VERSION'] ?? '',
+        'hl': config['HL'] ?? 'en',
+        'cr': config['GL'] ?? 'US',
+        'muted': '0',
+        'volume': '100',
+        'fs': '0',
+      },
+    );
+
+    try {
+      final cookies = await cookieJar.loadForRequest(uri);
+      final cookieString =
+          cookies.map((c) => '${c.name}=${c.value}').join('; ');
+
+      final headers = <String, String>{
+        ..._baseHeaders,
+        if (cookieString.isNotEmpty) 'cookie': cookieString,
+        'referer': 'https://music.youtube.com/',
+        'origin': 'https://music.youtube.com',
+      };
+
+      await _client.get(uri, headers: headers);
+    } catch (_) {
+      // Silently ignore a failed ping must never interrupt playback
     }
   }
 
@@ -1153,5 +1226,114 @@ class YTMusic {
         .whereType<HomeSection>()
         .where((section) => section.contents.isNotEmpty)
         .toList();
+  }
+
+  //  Returns the YT Music home page as a list of [HomeSection] objects,
+  //  mirroring exactly what the app shows: Top picks, Trending, New releases,
+  //  Top albums, Moods & genres, etc.
+  
+  //  [country] is an ISO 3166-1 alpha-2 country code (e.g. `"US"`, `"IN"`,
+  //  `"GB"`, `"JP"`).  Pass `null` or omit it to use the global / default
+  //  locale that was set during [initialize].  Pass `"global"` to explicitly
+  //  request the worldwide feed (`GL = "US"` is used as the neutral default
+  //  when YT Music has no per-country feed).
+  
+  //  Each [HomeSection] has:
+  //  - [HomeSection.title]       — localised display title (e.g. "Top picks")
+  //  - [HomeSection.stableTitle] — locale-independent slug for reliable
+  //    programmatic matching (e.g. `"top_picks"`, `"trending"`, `"top_albums"`)
+  //  - [HomeSection.contents]    — list of [AlbumDetailed], [PlaylistDetailed],
+  //    or [SongDetailed] items
+  Future<List<HomeSection>> getHome({String? country}) async {
+    // Resolve the GL (country) to use for this call.
+    final String? previousGl = config['GL'];
+    final String? previousHl = config['HL'];
+
+    if (country != null) {
+      final resolved = country.toLowerCase() == 'global' ? 'US' : country.toUpperCase();
+      config['GL'] = resolved;
+    }
+
+    try {
+      // 1. Main home feed + new releases + new releases albums in parallel
+      final futures = await Future.wait([
+        constructRequest("browse", body: {"browseId": feMusicHome}),
+        constructRequest("browse", body: {"browseId": feMusicNewReleases})
+            .catchError((_) => null),
+        constructRequest("browse", body: {"browseId": feMusicNewReleasesAlbums})
+            .catchError((_) => null),
+      ]);
+
+      final homeData = futures[0];
+      final newReleasesData = futures[1];
+      final newReleasesAlbumsData = futures[2];
+
+      final sections = <dynamic>[];
+
+      if (homeData != null) {
+        sections.addAll(
+            traverseList(homeData, ["sectionListRenderer", "contents"]));
+      }
+      if (newReleasesData != null) {
+        sections.addAll(
+            traverseList(newReleasesData, ["sectionListRenderer", "contents"]));
+      }
+      if (newReleasesAlbumsData != null) {
+        sections.addAll(traverseList(
+            newReleasesAlbumsData, ["sectionListRenderer", "contents"]));
+      }
+
+      // 2. Follow continuation pages from the main home feed (up to 5 pages)
+      dynamic continuation = _extractContinuationToken(homeData);
+      final seen = <String>{};
+      var pageCount = 0;
+
+      while (continuation != null &&
+          continuation.toString().isNotEmpty &&
+          continuation.toString() != 'null' &&
+          pageCount < 5) {
+        if (!seen.add(continuation.toString())) break;
+        pageCount++;
+        try {
+          final continuationData = await constructRequest("browse",
+              query: {"continuation": continuation.toString()});
+          final newContents = traverseList(
+              continuationData, ["sectionListContinuation", "contents"]);
+          if (newContents.isNotEmpty) {
+            sections.addAll(newContents);
+          }
+          continuation = _extractContinuationToken(continuationData);
+        } catch (_) {
+          break;
+        }
+      }
+
+      // 3. Parse and deduplicate sections by title
+      final seen2 = <String>{};
+      return sections
+          .map((item) {
+            try {
+              return Parser.parseHomeSection(item);
+            } catch (_) {
+              return null;
+            }
+          })
+          .whereType<HomeSection>()
+          .where((section) => section.contents.isNotEmpty)
+          .where((section) => seen2.add(section.title))
+          .toList();
+    } finally {
+      // Restore the original GL/HL so other calls are not affected
+      if (country != null) {
+        if (previousGl != null) {
+          config['GL'] = previousGl;
+        } else {
+          config.remove('GL');
+        }
+        if (previousHl != null) {
+          config['HL'] = previousHl;
+        }
+      }
+    }
   }
 }

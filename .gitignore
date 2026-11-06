@@ -34,9 +34,11 @@ doc/api/
 # dotenv environment variables file
 .env
 
-
+.dart_tool
 
 # End of https://www.toptal.com/developers/gitignore/api/dart
 
 # Secrets file
 lib/secrets/secrets.dart
+
+

@@ -616,17 +616,37 @@ class UpNextsDetails {
   }
 }
 
+// A section on the YT Music home page (e.g. "Top picks", "Trending", "New albums").
+// [title] is the localised display title returned by YT Music (e.g. "Top picks",
+// "Trending", "New albums & singles").
+// [stableTitle] is a normalised, locale-independent slug derived from the raw
+// title.  Use it for reliable programmatic matching regardless of the user's
+// language.  Known values include:
+//   `"top_picks"`, `"trending"`, `"new_releases"`, `"top_albums"`,
+//   `"top_singles"`, `"top_videos"`, `"mixed_for_you"`, `"charts"`,
+//   `"moods_and_genres"`, `"recommended"`.
+// Falls back to a snake_case version of [title] when no known mapping exists.
+//
+// [contents] is a heterogeneous list whose items are one of
+// [AlbumDetailed], [PlaylistDetailed], or [SongDetailed].
 class HomeSection {
   final String title;
+  final String stableTitle;
   final List<dynamic> contents;
 
   HomeSection({
     required this.title,
+    required this.stableTitle,
     required this.contents,
   });
 
   // Construtor nomeado para criar uma HomeSection a partir de um mapa
   HomeSection.fromMap(Map<String, dynamic> map)
       : title = map['title'] as String,
+        stableTitle = map['stableTitle'] as String? ??
+            (map['title'] as String)
+                .toLowerCase()
+                .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+                .replaceAll(RegExp(r'^_|_$'), ''),
         contents = map['contents'] as List<dynamic>;
 }
