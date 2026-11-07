@@ -1267,41 +1267,162 @@ class YTMusic {
     }
 
     try {
-      // ── 1. Fetch the main home feed only (ytmusicapi pattern) ──────────
-      // FEmusic_new_releases / FEmusic_new_releases_albums are sub-sections
-      // that are already included inside FEmusic_home via continuations.
-      // Merging them separately caused duplicate + mismatched sections.
-      final homeData =
-          await constructRequest("browse", body: {"browseId": feMusicHome});
+      // ── 1. Fetch all feeds in parallel ───────────────────────────────
+      // Unauthenticated InnerTube sessions split home content across:
+      // - feMusicHome:    Quick picks (songs) & personalized regional mixes (playlists)
+      // - feMusicExplore: New albums & singles (albums), Trending (songs), New music videos
+      // - feMusicCharts:  Regional video charts, Language playlists
+      // - Global Charts:  FEmusic_charts with formData → ZZ (Global)
+      // - Pop/Hits:       FEmusic_moods_and_genres_category → Featured playlists
+      // - Feel Good:      FEmusic_moods_and_genres_category → Feeling happy playlists
+      final responses = await Future.wait([
+        constructRequest("browse", body: {"browseId": feMusicHome}),
+        constructRequest("browse", body: {"browseId": feMusicExplore})
+            .catchError((_) => null),
+        constructRequest("browse", body: {"browseId": feMusicCharts})
+            .catchError((_) => null),
+        // Global Charts
+        constructRequest("browse", body: {
+          "browseId": feMusicCharts,
+          "formData": {
+            "selectedValues": [
+              // "ZZ" (Global) form entity key from the charts country selector
+              "EidleHBsb3JlX2NoYXJ0c19jb3VudHJ5X21lbnVfMzE2NzY2NTY3WlogkQEoAQ%3D%3D"
+            ]
+          }
+        }).catchError((_) => null),
+        // Pop / Today's biggest pop hits
+        constructRequest("browse", body: {
+          "browseId": "FEmusic_moods_and_genres_category",
+          "params": "ggMPOg1uX1lLQkxHbHhWQUUy", // Pop genre
+        }).catchError((_) => null),
+        // Feel Good / Feeling happy
+        constructRequest("browse", body: {
+          "browseId": "FEmusic_moods_and_genres_category",
+          "params": "ggMPOg1uXzZQbDB5eThLRTQ3", // Feel good mood
+        }).catchError((_) => null),
+      ]);
 
-      // ── 2. Extract top-level section list ──────────────────────────────
-      // Path: contents.singleColumnBrowseResultsRenderer
-      //         .tabs[0].tabRenderer.content.sectionListRenderer.contents
-      // traverseList with deep recursion is correct here because the
-      // sectionListRenderer can sit at variable depth.
+      // ── 2. Extract sections from all response feeds ────────────────────
       final sections = <dynamic>[];
-      sections.addAll(
-          traverseList(homeData, ["sectionListRenderer", "contents"]));
 
-      // ── 3. Follow continuation pages (up to 5) ─────────────────────────
-      // ytmusicapi uses continuationContents.sectionListContinuation.contents
-      dynamic continuation = _extractContinuationToken(homeData);
+      // Feeds 0–2: Home, Explore, Local Charts — add all shelves as-is
+      for (final resp in responses.sublist(0, 3)) {
+        if (resp != null) {
+          sections.addAll(
+              traverseList(resp, ["sectionListRenderer", "contents"]));
+        }
+      }
+
+      // Helper to extract shelf title from a musicCarouselShelfBasicHeaderRenderer map
+      String shelfTitle(Map bhr) {
+        final runs = bhr['title']?['runs'];
+        if (runs is List && runs.isNotEmpty && runs[0] is Map) {
+          return (runs[0] as Map)['text']?.toString() ?? '';
+        }
+        return '';
+      }
+
+      // Feed 3: Global Charts — rename "Video charts" to "Top Global Hits"
+      if (responses[3] != null) {
+        final globalShelves = traverseList(
+            responses[3], ["sectionListRenderer", "contents"]);
+        for (final s in globalShelves) {
+          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+            final shelf = s['musicCarouselShelfRenderer'];
+            if (shelf is Map) {
+              final header = shelf['header'];
+              if (header is Map) {
+                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                if (bhr is Map) {
+                  final title = shelfTitle(bhr);
+                  if (title.toLowerCase().contains('video chart') ||
+                      title.toLowerCase().contains('chart')) {
+                    // Rename so it doesn't collide with local "Video charts"
+                    bhr['title'] = {
+                      'runs': [
+                        {'text': 'Top Global Hits'}
+                      ]
+                    };
+                    sections.add(s);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Feed 4: Pop — take only "Featured playlists" shelf, rename to "Today's Pop Hits"
+      if (responses[4] != null) {
+        final popShelves = traverseList(
+            responses[4], ["sectionListRenderer", "contents"]);
+        for (final s in popShelves) {
+          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+            final shelf = s['musicCarouselShelfRenderer'];
+            if (shelf is Map) {
+              final header = shelf['header'];
+              if (header is Map) {
+                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                if (bhr is Map) {
+                  final title = shelfTitle(bhr);
+                  if (title.toLowerCase().contains('featured')) {
+                    bhr['title'] = {
+                      'runs': [
+                        {'text': "Today's Pop Hits"}
+                      ]
+                    };
+                    sections.add(s);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Feed 5: Feel Good — take only "Feeling happy" / feel-good shelf
+      if (responses[5] != null) {
+        final fgShelves = traverseList(
+            responses[5], ["sectionListRenderer", "contents"]);
+        for (final s in fgShelves) {
+          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+            final shelf = s['musicCarouselShelfRenderer'];
+            if (shelf is Map) {
+              final header = shelf['header'];
+              if (header is Map) {
+                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                if (bhr is Map) {
+                  final title = shelfTitle(bhr);
+                  if (title.toLowerCase().contains('feeling happy') ||
+                      title.toLowerCase().contains('feel-good')) {
+                    sections.add(s);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // ── 3. Follow continuation pages if available ──────────────────────
+      dynamic continuation = _extractContinuationToken(responses[0]);
       final seen = <String>{};
       var pageCount = 0;
 
       while (continuation != null &&
           continuation.toString().isNotEmpty &&
           continuation.toString() != 'null' &&
-          pageCount < 5) {
+          pageCount < 3) {
         if (!seen.add(continuation.toString())) break;
         pageCount++;
         try {
           final contData = await constructRequest("browse",
               query: {"continuation": continuation.toString()});
 
-          // Primary path (ytmusicapi: continuationContents.sectionListContinuation)
           List<dynamic> newContents = [];
-
           final contContents = contData?['continuationContents'];
           if (contContents is Map) {
             final slc = contContents['sectionListContinuation'];
@@ -1311,7 +1432,6 @@ class YTMusic {
             }
           }
 
-          // Fallback to the old path in case the response shape differs
           if (newContents.isEmpty) {
             newContents = traverseList(
                 contData, ["sectionListContinuation", "contents"]);
@@ -1330,7 +1450,7 @@ class YTMusic {
         }
       }
 
-      // ── 4. Parse sections using the new accurate parser ─────────────────
+      // ── 4. Parse sections using the accurate parser ────────────────────
       final seenTitles = <String>{};
       final result = <HomeSection>[];
 
@@ -1339,8 +1459,8 @@ class YTMusic {
           final section = Parser.parseHomeSection(item);
           if (section == null) continue;
           if (section.contents.isEmpty) continue;
-          // Deduplicate by title (localised)
-          if (!seenTitles.add(section.title)) continue;
+          final cleanTitle = section.title.toLowerCase().trim();
+          if (cleanTitle.isEmpty || !seenTitles.add(cleanTitle)) continue;
           result.add(section);
         } catch (_) {
           continue;

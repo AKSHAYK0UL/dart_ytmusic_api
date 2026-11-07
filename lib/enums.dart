@@ -16,6 +16,8 @@ enum PageType {
 }
 
 const String feMusicHome = "FEmusic_home";
+const String feMusicExplore = "FEmusic_explore";
+const String feMusicCharts = "FEmusic_charts";
 const String feMusicNewReleases = "FEmusic_new_releases";
 const String feMusicNewReleasesAlbums = "FEmusic_new_releases_albums";
 const String androidClientName = 'ANDROID_MUSIC';

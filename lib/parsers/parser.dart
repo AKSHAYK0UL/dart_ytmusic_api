@@ -589,6 +589,9 @@ class Parser {
       'recommended for you': 'recommended',
       'our picks': 'top_picks',
       'trending': 'trending',
+      // Global hits / charts — must come before the generic 'chart' key
+      'top global hits': 'global_hits',
+      'global chart': 'global_charts',
       'chart': 'charts',
       'top song': 'trending',
       'top track': 'trending',
@@ -608,6 +611,11 @@ class Parser {
       'mixed for you': 'mixed_for_you',
       'mix for you': 'mixed_for_you',
       'your mix': 'mixed_for_you',
+      // Pop/mood/feel-good — specific keys first
+      "today's pop hits": 'pop_hits',
+      'pop hit': 'pop_hits',
+      'feeling happy': 'feel_good',
+      'feel-good': 'feel_good',
       'mood': 'moods_and_genres',
       'genre': 'moods_and_genres',
       'feel': 'moods_and_genres',
