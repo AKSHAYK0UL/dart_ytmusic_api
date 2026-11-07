@@ -119,14 +119,40 @@ class PlaylistParser {
         name: traverseString(artist, ["text"]) ?? '',
         artistId: traverseString(artist, ["browseId"]),
       ),
-      thumbnails: traverseList(item, ["thumbnails"])
-          .whereType<Map>()
-          .map((thumb) => ThumbnailFull(
-                url: thumb['url']?.toString() ?? '',
-                width: (thumb['width'] as num?)?.toInt() ?? 0,
-                height: (thumb['height'] as num?)?.toInt() ?? 0,
-              ))
-          .toList(),
+      thumbnails: _extractTwoRowThumbnails(item),
     );
+  }
+
+  /// Extracts thumbnails from a musicTwoRowItemRenderer.
+  static List<ThumbnailFull> _extractTwoRowThumbnails(dynamic item) {
+    if (item is! Map) return const [];
+
+    final renderer = item['thumbnailRenderer'];
+    if (renderer is Map) {
+      final mtr = renderer['musicThumbnailRenderer'];
+      if (mtr is Map) {
+        final thumb = mtr['thumbnail'];
+        if (thumb is Map) {
+          final thumbs = thumb['thumbnails'];
+          if (thumbs is List) {
+            return thumbs.whereType<Map>().map((t) => ThumbnailFull(
+              url: t['url']?.toString() ?? '',
+              width: (t['width'] as num?)?.toInt() ?? 0,
+              height: (t['height'] as num?)?.toInt() ?? 0,
+            )).toList();
+          }
+        }
+      }
+    }
+
+    // Fallback: deep traversal
+    return traverseList(item, ["thumbnails"])
+        .whereType<Map>()
+        .map((thumb) => ThumbnailFull(
+              url: thumb['url']?.toString() ?? '',
+              width: (thumb['width'] as num?)?.toInt() ?? 0,
+              height: (thumb['height'] as num?)?.toInt() ?? 0,
+            ))
+        .toList();
   }
 }

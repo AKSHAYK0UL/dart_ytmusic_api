@@ -360,15 +360,8 @@ class AlbumParser {
       }
     }
 
-    // 6. Thumbnails
-    final thumbnails = traverseList(item, ["thumbnails"])
-        .whereType<Map>()
-        .map((thumb) => ThumbnailFull(
-              url: thumb['url']?.toString() ?? '',
-              width: (thumb['width'] as num?)?.toInt() ?? 0,
-              height: (thumb['height'] as num?)?.toInt() ?? 0,
-            ))
-        .toList();
+    // 6. Thumbnails — use the correct thumbnailRenderer path for musicTwoRowItemRenderer
+    List<ThumbnailFull> thumbnails = _extractTwoRowThumbnails(item);
 
     return AlbumDetailed(
       type: "ALBUM",
@@ -382,6 +375,57 @@ class AlbumParser {
       year: year,
       thumbnails: thumbnails,
     );
+  }
+
+  /// Extracts thumbnails from a musicTwoRowItemRenderer using the correct path:
+  ///   thumbnailRenderer.musicThumbnailRenderer.thumbnail.thumbnails
+  static List<ThumbnailFull> _extractTwoRowThumbnails(dynamic item) {
+    if (item is! Map) return const [];
+
+    final renderer = item['thumbnailRenderer'];
+    if (renderer is Map) {
+      final mtr = renderer['musicThumbnailRenderer'];
+      if (mtr is Map) {
+        final thumb = mtr['thumbnail'];
+        if (thumb is Map) {
+          final thumbs = thumb['thumbnails'];
+          if (thumbs is List) return _thumbsFromList(thumbs);
+        }
+      }
+    }
+
+    // Fallback: thumbnail.musicThumbnailRenderer.thumbnail.thumbnails
+    final thumb2 = item['thumbnail'];
+    if (thumb2 is Map) {
+      final mtr2 = thumb2['musicThumbnailRenderer'];
+      if (mtr2 is Map) {
+        final t = mtr2['thumbnail'];
+        if (t is Map) {
+          final thumbs = t['thumbnails'];
+          if (thumbs is List) return _thumbsFromList(thumbs);
+        }
+      }
+      final directThumbs = thumb2['thumbnails'];
+      if (directThumbs is List) return _thumbsFromList(directThumbs);
+    }
+
+    // Last resort: deep traversal (old behaviour)
+    return traverseList(item, ["thumbnails"])
+        .whereType<Map>()
+        .map((thumb) => ThumbnailFull(
+              url: thumb['url']?.toString() ?? '',
+              width: (thumb['width'] as num?)?.toInt() ?? 0,
+              height: (thumb['height'] as num?)?.toInt() ?? 0,
+            ))
+        .toList();
+  }
+
+  static List<ThumbnailFull> _thumbsFromList(List thumbs) {
+    return thumbs.whereType<Map>().map((t) => ThumbnailFull(
+      url: t['url']?.toString() ?? '',
+      width: (t['width'] as num?)?.toInt() ?? 0,
+      height: (t['height'] as num?)?.toInt() ?? 0,
+    )).toList();
   }
 
   static int? processYear(String? year) {

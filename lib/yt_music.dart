@@ -1185,7 +1185,8 @@ class YTMusic {
 
     final sections = <dynamic>[];
     if (homeData != null) {
-      sections.addAll(traverseList(homeData, ["sectionListRenderer", "contents"]));
+      sections.addAll(
+          traverseList(homeData, ["sectionListRenderer", "contents"]));
     }
     if (newReleasesData != null) {
       sections.addAll(
@@ -1202,14 +1203,25 @@ class YTMusic {
       if (!seen.add(continuation.toString())) break;
       pageCount++;
       try {
-        final continuationData = await constructRequest("browse",
+        final contData = await constructRequest("browse",
             query: {"continuation": continuation.toString()});
-        final newContents = traverseList(
-            continuationData, ["sectionListContinuation", "contents"]);
-        if (newContents.isNotEmpty) {
-          sections.addAll(newContents);
+
+        List<dynamic> newContents = [];
+        final contContents = contData?['continuationContents'];
+        if (contContents is Map) {
+          final slc = contContents['sectionListContinuation'];
+          if (slc is Map) {
+            final c = slc['contents'];
+            if (c is List) newContents = c;
+          }
         }
-        continuation = _extractContinuationToken(continuationData);
+        if (newContents.isEmpty) {
+          newContents =
+              traverseList(contData, ["sectionListContinuation", "contents"]);
+        }
+        sections.addAll(newContents
+            .where((i) => i is! Map || !i.containsKey('continuationItemRenderer')));
+        continuation = _extractContinuationToken(contData);
       } catch (_) {
         break;
       }
@@ -1245,45 +1257,34 @@ class YTMusic {
   //  - [HomeSection.contents]    — list of [AlbumDetailed], [PlaylistDetailed],
   //    or [SongDetailed] items
   Future<List<HomeSection>> getHome({String? country}) async {
-    // Resolve the GL (country) to use for this call.
     final String? previousGl = config['GL'];
     final String? previousHl = config['HL'];
 
     if (country != null) {
-      final resolved = country.toLowerCase() == 'global' ? 'US' : country.toUpperCase();
+      final resolved =
+          country.toLowerCase() == 'global' ? 'US' : country.toUpperCase();
       config['GL'] = resolved;
     }
 
     try {
-      // 1. Main home feed + new releases + new releases albums in parallel
-      final futures = await Future.wait([
-        constructRequest("browse", body: {"browseId": feMusicHome}),
-        constructRequest("browse", body: {"browseId": feMusicNewReleases})
-            .catchError((_) => null),
-        constructRequest("browse", body: {"browseId": feMusicNewReleasesAlbums})
-            .catchError((_) => null),
-      ]);
+      // ── 1. Fetch the main home feed only (ytmusicapi pattern) ──────────
+      // FEmusic_new_releases / FEmusic_new_releases_albums are sub-sections
+      // that are already included inside FEmusic_home via continuations.
+      // Merging them separately caused duplicate + mismatched sections.
+      final homeData =
+          await constructRequest("browse", body: {"browseId": feMusicHome});
 
-      final homeData = futures[0];
-      final newReleasesData = futures[1];
-      final newReleasesAlbumsData = futures[2];
-
+      // ── 2. Extract top-level section list ──────────────────────────────
+      // Path: contents.singleColumnBrowseResultsRenderer
+      //         .tabs[0].tabRenderer.content.sectionListRenderer.contents
+      // traverseList with deep recursion is correct here because the
+      // sectionListRenderer can sit at variable depth.
       final sections = <dynamic>[];
+      sections.addAll(
+          traverseList(homeData, ["sectionListRenderer", "contents"]));
 
-      if (homeData != null) {
-        sections.addAll(
-            traverseList(homeData, ["sectionListRenderer", "contents"]));
-      }
-      if (newReleasesData != null) {
-        sections.addAll(
-            traverseList(newReleasesData, ["sectionListRenderer", "contents"]));
-      }
-      if (newReleasesAlbumsData != null) {
-        sections.addAll(traverseList(
-            newReleasesAlbumsData, ["sectionListRenderer", "contents"]));
-      }
-
-      // 2. Follow continuation pages from the main home feed (up to 5 pages)
+      // ── 3. Follow continuation pages (up to 5) ─────────────────────────
+      // ytmusicapi uses continuationContents.sectionListContinuation.contents
       dynamic continuation = _extractContinuationToken(homeData);
       final seen = <String>{};
       var pageCount = 0;
@@ -1295,35 +1296,59 @@ class YTMusic {
         if (!seen.add(continuation.toString())) break;
         pageCount++;
         try {
-          final continuationData = await constructRequest("browse",
+          final contData = await constructRequest("browse",
               query: {"continuation": continuation.toString()});
-          final newContents = traverseList(
-              continuationData, ["sectionListContinuation", "contents"]);
-          if (newContents.isNotEmpty) {
-            sections.addAll(newContents);
+
+          // Primary path (ytmusicapi: continuationContents.sectionListContinuation)
+          List<dynamic> newContents = [];
+
+          final contContents = contData?['continuationContents'];
+          if (contContents is Map) {
+            final slc = contContents['sectionListContinuation'];
+            if (slc is Map) {
+              final c = slc['contents'];
+              if (c is List) newContents = c;
+            }
           }
-          continuation = _extractContinuationToken(continuationData);
+
+          // Fallback to the old path in case the response shape differs
+          if (newContents.isEmpty) {
+            newContents = traverseList(
+                contData, ["sectionListContinuation", "contents"]);
+          }
+
+          for (final item in newContents) {
+            if (item is Map &&
+                !item.containsKey('continuationItemRenderer')) {
+              sections.add(item);
+            }
+          }
+
+          continuation = _extractContinuationToken(contData);
         } catch (_) {
           break;
         }
       }
 
-      // 3. Parse and deduplicate sections by title
-      final seen2 = <String>{};
-      return sections
-          .map((item) {
-            try {
-              return Parser.parseHomeSection(item);
-            } catch (_) {
-              return null;
-            }
-          })
-          .whereType<HomeSection>()
-          .where((section) => section.contents.isNotEmpty)
-          .where((section) => seen2.add(section.title))
-          .toList();
+      // ── 4. Parse sections using the new accurate parser ─────────────────
+      final seenTitles = <String>{};
+      final result = <HomeSection>[];
+
+      for (final item in sections) {
+        try {
+          final section = Parser.parseHomeSection(item);
+          if (section == null) continue;
+          if (section.contents.isEmpty) continue;
+          // Deduplicate by title (localised)
+          if (!seenTitles.add(section.title)) continue;
+          result.add(section);
+        } catch (_) {
+          continue;
+        }
+      }
+
+      return result;
     } finally {
-      // Restore the original GL/HL so other calls are not affected
       if (country != null) {
         if (previousGl != null) {
           config['GL'] = previousGl;
