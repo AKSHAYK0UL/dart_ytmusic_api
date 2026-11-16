@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:cookie_jar/cookie_jar.dart';
+import 'package:crypto/crypto.dart';
 import 'package:dart_ytmusic_api/enums.dart';
 import 'package:dart_ytmusic_api/parsers/album_parser.dart';
 import 'package:dart_ytmusic_api/parsers/artist_parser.dart';
@@ -11,7 +12,6 @@ import 'package:dart_ytmusic_api/parsers/search_parser.dart';
 import 'package:dart_ytmusic_api/parsers/song_parser.dart';
 import 'package:dart_ytmusic_api/parsers/video_parser.dart';
 import 'package:dart_ytmusic_api/types.dart';
-
 import 'package:dart_ytmusic_api/utils/traverse.dart';
 import 'package:http/http.dart' as http;
 
@@ -24,7 +24,7 @@ class YTMusic {
   YTMusic({String? apiKey}) {
     cookieJar = CookieJar();
     config = {
-       if (apiKey != null && apiKey.isNotEmpty) 'INNERTUBE_API_KEY': apiKey,
+      if (apiKey != null && apiKey.isNotEmpty) 'INNERTUBE_API_KEY': apiKey,
       'INNERTUBE_API_VERSION': 'v1',
       'INNERTUBE_CLIENT_NAME': 'WEB_REMIX',
       'INNERTUBE_CLIENT_VERSION': '1.20241104.01.00',
@@ -36,7 +36,7 @@ class YTMusic {
     _client = http.Client();
     _baseHeaders = {
       "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.129 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
       "Accept": "*/*",
       "Accept-Language": "en-US,en;q=0.9",
     };
@@ -49,11 +49,67 @@ class YTMusic {
   bool hasInitialized = false;
   bool _isAuthenticated = false;
   String? ytMusicHomeRawHtml;
+  String? _cookieString;
+  final Map<String, String> _cookieMap = {};
 
   // Returns true if auth cookies have been loaded into the session.
   // When true, [getHome] returns a personalised feed and [reportPlayback]
   // will update the account's watch history on Google's servers.
   bool get isAuthenticated => _isAuthenticated;
+
+  // Returns the current SAPISID / 3PAPISID value from loaded cookies, if present.
+  String? get sapisid =>
+      _cookieMap['__Secure-3PAPISID'] ??
+      _cookieMap['SAPISID'] ??
+      _cookieMap['__Secure-1PAPISID'];
+
+  // Computes the SAPISIDHASH authorization header required by Google InnerTube.
+  String? _generateSapisidHash(String origin) {
+    final sid = sapisid;
+    if (sid == null || sid.isEmpty) return null;
+    final timestamp =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000).toString();
+    final hashInput = '$timestamp $sid $origin';
+    final sha1Digest = sha1.convert(utf8.encode(hashInput)).toString();
+    return 'SAPISIDHASH ${timestamp}_$sha1Digest';
+  }
+
+  // Loads YouTube Music auth cookies into the session and marks it as authenticated.
+  void setCookies(String cookies) {
+    _cookieString = cookies;
+    _cookieMap.clear();
+    for (final cookieString in cookies.split(';')) {
+      final trimmed = cookieString.trim();
+      if (trimmed.isEmpty) continue;
+      final eqIdx = trimmed.indexOf('=');
+      if (eqIdx != -1) {
+        final key = trimmed.substring(0, eqIdx).trim();
+        final val = trimmed.substring(eqIdx + 1).trim();
+        _cookieMap[key] = val;
+        try {
+          final cookie = Cookie.fromSetCookieValue('$key=$val');
+          cookie.domain = '.youtube.com';
+          cookieJar.saveFromResponse(
+            Uri.parse('https://www.youtube.com/'),
+            [cookie],
+          );
+          cookieJar.saveFromResponse(
+            Uri.parse('https://music.youtube.com/'),
+            [cookie],
+          );
+        } catch (_) {}
+      }
+    }
+    _isAuthenticated = sapisid != null && sapisid!.isNotEmpty;
+  }
+
+  // Clears stored auth cookies from the session.
+  void clearCookies() {
+    _cookieString = null;
+    _cookieMap.clear();
+    cookieJar = CookieJar();
+    _isAuthenticated = false;
+  }
 
   /// Initializes the YTMusic instance with provided cookies, geolocation, and language.
   ///
@@ -68,24 +124,15 @@ class YTMusic {
     String? ytMusicHomeRawHtml,
     String? dataApiKey,
   }) async {
+    if (cookies != null && cookies.isNotEmpty) {
+      setCookies(cookies);
+    }
+
     if (hasInitialized) {
       return this;
     }
 
     this.ytMusicHomeRawHtml = ytMusicHomeRawHtml;
-
-    if (cookies != null) {
-      for (final cookieString in cookies.split('; ')) {
-        try {
-          final cookie = Cookie.fromSetCookieValue(cookieString);
-          cookieJar.saveFromResponse(
-            Uri.parse('https://www.youtube.com/'),
-            [cookie],
-          );
-        } catch (_) {}
-      }
-      _isAuthenticated = true;
-    }
 
     if (gl != null) config['GL'] = gl;
     if (hl != null) config['HL'] = hl;
@@ -131,23 +178,28 @@ class YTMusic {
       print('Browser compatibility error in HTML response');
       throw Exception('Browser compatibility error detected');
     }
-    config['VISITOR_DATA'] = _extractValue(html, r'"VISITOR_DATA":"(.*?)"');
-    config['INNERTUBE_CONTEXT_CLIENT_NAME'] = _extractValue(
-        html, r'"INNERTUBE_CONTEXT_CLIENT_NAME":\s*(-?\d+|\"(.*?)\")');
-    config['INNERTUBE_CLIENT_VERSION'] =
-        _extractValue(html, r'"INNERTUBE_CLIENT_VERSION":"(.*?)"');
-    config['DEVICE'] = _extractValue(html, r'"DEVICE":"(.*?)"');
-    config['PAGE_CL'] = _extractValue(html, r'"PAGE_CL":\s*(-?\d+|\"(.*?)\")');
-    config['PAGE_BUILD_LABEL'] =
-        _extractValue(html, r'"PAGE_BUILD_LABEL":"(.*?)"');
-    config['INNERTUBE_API_KEY'] =
-        _extractValue(html, r'"INNERTUBE_API_KEY":"(.*?)"');
-    config['INNERTUBE_API_VERSION'] =
-        _extractValue(html, r'"INNERTUBE_API_VERSION":"(.*?)"');
-    config['INNERTUBE_CLIENT_NAME'] =
-        _extractValue(html, r'"INNERTUBE_CLIENT_NAME":"(.*?)"');
-    config['GL'] = _extractValue(html, r'"GL":"(.*?)"');
-    config['HL'] = _extractValue(html, r'"HL":"(.*?)"');
+    void updateIfNotEmpty(String key, String regex) {
+      final val = _extractValue(html, regex);
+      if (val.isNotEmpty) {
+        config[key] = val;
+      }
+    }
+
+    updateIfNotEmpty('VISITOR_DATA', r'"VISITOR_DATA":"(.*?)"');
+    updateIfNotEmpty('INNERTUBE_CONTEXT_CLIENT_NAME',
+        r'"INNERTUBE_CONTEXT_CLIENT_NAME":\s*(-?\d+|\"(.*?)\")');
+    updateIfNotEmpty(
+        'INNERTUBE_CLIENT_VERSION', r'"INNERTUBE_CLIENT_VERSION":"(.*?)"');
+    updateIfNotEmpty('DEVICE', r'"DEVICE":"(.*?)"');
+    updateIfNotEmpty('PAGE_CL', r'"PAGE_CL":\s*(-?\d+|\"(.*?)\")');
+    updateIfNotEmpty('PAGE_BUILD_LABEL', r'"PAGE_BUILD_LABEL":"(.*?)"');
+    updateIfNotEmpty('INNERTUBE_API_KEY', r'"INNERTUBE_API_KEY":"(.*?)"');
+    updateIfNotEmpty(
+        'INNERTUBE_API_VERSION', r'"INNERTUBE_API_VERSION":"(.*?)"');
+    updateIfNotEmpty(
+        'INNERTUBE_CLIENT_NAME', r'"INNERTUBE_CLIENT_NAME":"(.*?)"');
+    updateIfNotEmpty('GL', r'"GL":"(.*?)"');
+    updateIfNotEmpty('HL', r'"HL":"(.*?)"');
   }
 
   /// Extracts a value from HTML using a regular expression.
@@ -163,7 +215,7 @@ class YTMusic {
     Map<String, String> query = const {},
     ClientRequestOptions? options,
   }) async {
-    final baseUrl = "https://music.youtube.com/";
+    const origin = "https://music.youtube.com";
     final cleanedQuery = <String, String>{};
     for (final entry in query.entries) {
       final v = entry.value;
@@ -171,27 +223,39 @@ class YTMusic {
         cleanedQuery[entry.key] = v;
       }
     }
+    final apiKey = config['INNERTUBE_API_KEY'] ?? config['DATA_API_KEY'];
     final fullQuery = {
       ...cleanedQuery,
       "alt": "json",
-      "key": config['INNERTUBE_API_KEY'],
+      if (apiKey != null && apiKey.isNotEmpty) "key": apiKey,
     };
 
-    final uri = Uri.parse(baseUrl).replace(
-      path: "youtubei/${config['INNERTUBE_API_VERSION']}/$endpoint",
+    final uri = Uri.parse(origin).replace(
+      path: "youtubei/${config['INNERTUBE_API_VERSION'] ?? 'v1'}/$endpoint",
       queryParameters: fullQuery,
     );
 
     final cookies = await cookieJar.loadForRequest(uri);
-    final cookieString =
+    final jarCookieString =
         cookies.map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
+    final effectiveCookies =
+        (_cookieString != null && _cookieString!.isNotEmpty)
+            ? _cookieString!
+            : jarCookieString;
+
+    final authHeader = _generateSapisidHash(origin);
 
     final headers = <String, String>{
       ..._baseHeaders,
-      "x-origin": baseUrl,
-      "X-Goog-Visitor-Id": config['VISITOR_DATA'] ?? "",
-      "X-YouTube-Client-Name": config['INNERTUBE_CONTEXT_CLIENT_NAME'] ?? '',
-      "X-YouTube-Client-Version": config['INNERTUBE_CLIENT_VERSION'] ?? '',
+      "origin": origin,
+      "x-origin": origin,
+      if (authHeader != null) "Authorization": authHeader,
+      if (authHeader != null) "X-Goog-AuthUser": "0",
+        if (authHeader == null && config['VISITOR_DATA']?.isNotEmpty == true)
+          "X-Goog-Visitor-Id": config['VISITOR_DATA']!,
+      "X-YouTube-Client-Name": config['INNERTUBE_CONTEXT_CLIENT_NAME'] ?? '67',
+      "X-YouTube-Client-Version":
+          config['INNERTUBE_CLIENT_VERSION'] ?? '1.20241104.01.00',
       "X-YouTube-Device": config['DEVICE'] ?? '',
       "X-YouTube-Page-CL": config['PAGE_CL'] ?? '',
       "X-YouTube-Page-Label": config['PAGE_BUILD_LABEL'] ?? '',
@@ -200,8 +264,8 @@ class YTMusic {
       "Content-Type": "application/json",
     };
 
-    if (cookieString.isNotEmpty) {
-      headers['cookie'] = cookieString;
+    if (effectiveCookies.isNotEmpty) {
+      headers['cookie'] = effectiveCookies;
     }
 
     final requestBody = {
@@ -249,6 +313,8 @@ class YTMusic {
           "enableSafetyMode": false,
         },
       },
+      if (query.containsKey('continuation'))
+        "continuation": query['continuation'],
       ...body,
     };
 
@@ -290,10 +356,10 @@ class YTMusic {
 
   // Reports a song playback to YouTube Music's servers, which updates the
   // account's watch history and drives personalised recommendations in [getHome].
-  
+
   // Call this once per song, ideally when the song finishes or when the user
   // skips to the next track.
-  
+
   // [videoId]        — the song's YouTube videoId (e.g. `"dQw4w9WgXcQ"`)
   // [songDuration]   — total duration of the song in seconds
   // [listenedSeconds] — how many seconds the user actually listened to.
@@ -350,10 +416,18 @@ class YTMusic {
       final cookies = await cookieJar.loadForRequest(uri);
       final cookieString =
           cookies.map((c) => '${c.name}=${c.value}').join('; ');
+      final effectiveCookies =
+          (_cookieString != null && _cookieString!.isNotEmpty)
+              ? _cookieString!
+              : cookieString;
+
+      final authHeader = _generateSapisidHash('https://music.youtube.com');
 
       final headers = <String, String>{
         ..._baseHeaders,
-        if (cookieString.isNotEmpty) 'cookie': cookieString,
+        if (effectiveCookies.isNotEmpty) 'cookie': effectiveCookies,
+        if (authHeader != null) 'authorization': authHeader,
+        if (authHeader != null) 'x-goog-authuser': '0',
         'referer': 'https://music.youtube.com/',
         'origin': 'https://music.youtube.com',
       };
@@ -803,13 +877,16 @@ class YTMusic {
     List? rawItems;
     String? continuationToken;
     try {
-      final tabs = playlistData['contents']?['singleColumnBrowseResultsRenderer']?['tabs'] as List?;
+      final tabs = playlistData['contents']
+          ?['singleColumnBrowseResultsRenderer']?['tabs'] as List?;
       if (tabs != null && tabs.isNotEmpty) {
-        final sectionContents = tabs[0]?['tabRenderer']?['content']?['sectionListRenderer']?['contents'] as List?;
+        final sectionContents = tabs[0]?['tabRenderer']?['content']
+            ?['sectionListRenderer']?['contents'] as List?;
         if (sectionContents != null && sectionContents.isNotEmpty) {
           for (final section in sectionContents) {
             if (section is Map) {
-              final shelf = section['musicPlaylistShelfRenderer'] ?? section['musicShelfRenderer'];
+              final shelf = section['musicPlaylistShelfRenderer'] ??
+                  section['musicShelfRenderer'];
               if (shelf is Map) {
                 rawItems = shelf['contents'] as List?;
                 continuationToken = _extractContinuationTokenFromShelf(shelf);
@@ -834,7 +911,8 @@ class YTMusic {
     final songs = <dynamic>[];
     if (rawItems.isNotEmpty) {
       for (final item in rawItems) {
-        if (item is Map && item.containsKey('continuationItemRenderer')) continue;
+        if (item is Map && item.containsKey('continuationItemRenderer'))
+          continue;
         songs.add(item);
       }
     }
@@ -861,7 +939,8 @@ class YTMusic {
         continuationToken = null;
 
         List? contItems;
-        final shelfCont = songsData['continuationContents']?['musicPlaylistShelfContinuation'] ??
+        final shelfCont = songsData['continuationContents']
+                ?['musicPlaylistShelfContinuation'] ??
             songsData['continuationContents']?['musicShelfContinuation'] ??
             songsData['sectionListContinuation'];
 
@@ -878,7 +957,8 @@ class YTMusic {
 
         if (contItems != null && contItems.isNotEmpty) {
           for (final item in contItems) {
-            if (item is Map && item.containsKey('continuationItemRenderer')) continue;
+            if (item is Map && item.containsKey('continuationItemRenderer'))
+              continue;
             songs.add(item);
           }
         } else {
@@ -906,7 +986,9 @@ class YTMusic {
     // 1. Check inside shelf['contents'] for continuationItemRenderer
     final contents = shelf['contents'] as List?;
     if (contents != null && contents.isNotEmpty) {
-      for (int i = contents.length - 1; i >= 0 && i >= contents.length - 5; i--) {
+      for (int i = contents.length - 1;
+          i >= 0 && i >= contents.length - 5;
+          i--) {
         final item = contents[i];
         if (item is Map && item.containsKey('continuationItemRenderer')) {
           final token = _tokenFromContinuationEndpoint(
@@ -1020,9 +1102,8 @@ class YTMusic {
     const itemsUrl = 'https://www.googleapis.com/youtube/v3/playlistItems';
     const videosUrl = 'https://www.googleapis.com/youtube/v3/videos';
 
-    final cleanPlaylistId = playlistId.startsWith("VL")
-        ? playlistId.substring(2)
-        : playlistId;
+    final cleanPlaylistId =
+        playlistId.startsWith("VL") ? playlistId.substring(2) : playlistId;
 
     Uri buildItemsUri(String? pageToken) =>
         Uri.parse(itemsUrl).replace(queryParameters: <String, String>{
@@ -1046,7 +1127,9 @@ class YTMusic {
     var currentPageToken = firstBody['nextPageToken'] as String?;
     final seenTokens = <String>{};
     var pageCount = 0;
-    while (currentPageToken != null && currentPageToken.isNotEmpty && pageCount < 10) {
+    while (currentPageToken != null &&
+        currentPageToken.isNotEmpty &&
+        pageCount < 10) {
       if (!seenTokens.add(currentPageToken)) break;
       pageCount++;
       try {
@@ -1071,7 +1154,8 @@ class YTMusic {
         if (item is Map<String, dynamic>) {
           final cd = item['contentDetails'] as Map<String, dynamic>?;
           final sn = item['snippet'] as Map<String, dynamic>?;
-          final id = cd?['videoId']?.toString() ?? sn?['resourceId']?['videoId']?.toString();
+          final id = cd?['videoId']?.toString() ??
+              sn?['resourceId']?['videoId']?.toString();
           if (id != null && id.isNotEmpty && seenIds.add(id)) {
             videoIds.add(id);
             videoItems.add(item);
@@ -1086,8 +1170,10 @@ class YTMusic {
     const batchSize = 50;
     final batchUris = <Uri>[];
     for (var i = 0; i < videoIds.length; i += batchSize) {
-      final batch = videoIds.sublist(i, (i + batchSize).clamp(0, videoIds.length));
-      batchUris.add(Uri.parse(videosUrl).replace(queryParameters: <String, String>{
+      final batch =
+          videoIds.sublist(i, (i + batchSize).clamp(0, videoIds.length));
+      batchUris
+          .add(Uri.parse(videosUrl).replace(queryParameters: <String, String>{
         'part': 'contentDetails',
         'id': batch.join(','),
         'key': apiKey,
@@ -1096,7 +1182,8 @@ class YTMusic {
 
     final durationMap = <String, int>{};
     try {
-      final responses = await Future.wait(batchUris.map((uri) => _client.get(uri)));
+      final responses =
+          await Future.wait(batchUris.map((uri) => _client.get(uri)));
       for (final response in responses) {
         if (response.statusCode == 200) {
           final body = json.decode(response.body) as Map<String, dynamic>;
@@ -1118,26 +1205,27 @@ class YTMusic {
     for (final item in videoItems) {
       final cd = item['contentDetails'] as Map<String, dynamic>? ?? {};
       final snippet = item['snippet'] as Map<String, dynamic>? ?? {};
-      final id = cd['videoId']?.toString() ?? snippet['resourceId']?['videoId']?.toString() ?? '';
+      final id = cd['videoId']?.toString() ??
+          snippet['resourceId']?['videoId']?.toString() ??
+          '';
 
       final title = snippet['title'] as String? ?? '';
       final channelTitle = snippet['videoOwnerChannelTitle'] as String? ??
-          snippet['channelTitle'] as String? ?? '';
+          snippet['channelTitle'] as String? ??
+          '';
       final channelId = snippet['videoOwnerChannelId'] as String? ??
           snippet['channelId'] as String?;
 
       final rawThumbs = snippet['thumbnails'] as Map<String, dynamic>? ?? {};
-      final thumbnails = thumbOrder
-          .where((k) => rawThumbs.containsKey(k))
-          .map((k) {
-            final t = rawThumbs[k] as Map<String, dynamic>;
-            return ThumbnailFull(
-              url: t['url'] as String? ?? '',
-              width: t['width'] as int? ?? 0,
-              height: t['height'] as int? ?? 0,
-            );
-          })
-          .toList();
+      final thumbnails =
+          thumbOrder.where((k) => rawThumbs.containsKey(k)).map((k) {
+        final t = rawThumbs[k] as Map<String, dynamic>;
+        return ThumbnailFull(
+          url: t['url'] as String? ?? '',
+          width: t['width'] as int? ?? 0,
+          height: t['height'] as int? ?? 0,
+        );
+      }).toList();
 
       final dur = durationMap[id] ?? 0;
 
@@ -1163,9 +1251,9 @@ class YTMusic {
       r'P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?',
     ).firstMatch(raw);
     if (match == null) return 0;
-    final weeks   = int.tryParse(match.group(1) ?? '') ?? 0;
-    final days    = int.tryParse(match.group(2) ?? '') ?? 0;
-    final hours   = int.tryParse(match.group(3) ?? '') ?? 0;
+    final weeks = int.tryParse(match.group(1) ?? '') ?? 0;
+    final days = int.tryParse(match.group(2) ?? '') ?? 0;
+    final hours = int.tryParse(match.group(3) ?? '') ?? 0;
     final minutes = int.tryParse(match.group(4) ?? '') ?? 0;
     final seconds = int.tryParse(match.group(5) ?? '') ?? 0;
     return (weeks * 7 + days) * 86400 + hours * 3600 + minutes * 60 + seconds;
@@ -1185,8 +1273,8 @@ class YTMusic {
 
     final sections = <dynamic>[];
     if (homeData != null) {
-      sections.addAll(
-          traverseList(homeData, ["sectionListRenderer", "contents"]));
+      sections
+          .addAll(traverseList(homeData, ["sectionListRenderer", "contents"]));
     }
     if (newReleasesData != null) {
       sections.addAll(
@@ -1219,8 +1307,8 @@ class YTMusic {
           newContents =
               traverseList(contData, ["sectionListContinuation", "contents"]);
         }
-        sections.addAll(newContents
-            .where((i) => i is! Map || !i.containsKey('continuationItemRenderer')));
+        sections.addAll(newContents.where(
+            (i) => i is! Map || !i.containsKey('continuationItemRenderer')));
         continuation = _extractContinuationToken(contData);
       } catch (_) {
         break;
@@ -1243,13 +1331,13 @@ class YTMusic {
   //  Returns the YT Music home page as a list of [HomeSection] objects,
   //  mirroring exactly what the app shows: Top picks, Trending, New releases,
   //  Top albums, Moods & genres, etc.
-  
+
   //  [country] is an ISO 3166-1 alpha-2 country code (e.g. `"US"`, `"IN"`,
   //  `"GB"`, `"JP"`).  Pass `null` or omit it to use the global / default
   //  locale that was set during [initialize].  Pass `"global"` to explicitly
   //  request the worldwide feed (`GL = "US"` is used as the neutral default
   //  when YT Music has no per-country feed).
-  
+
   //  Each [HomeSection] has:
   //  - [HomeSection.title]       — localised display title (e.g. "Top picks")
   //  - [HomeSection.stableTitle] — locale-independent slug for reliable
@@ -1267,190 +1355,276 @@ class YTMusic {
     }
 
     try {
-      // ── 1. Fetch all feeds in parallel ───────────────────────────────
-      // Unauthenticated InnerTube sessions split home content across:
-      // - feMusicHome:    Quick picks (songs) & personalized regional mixes (playlists)
-      // - feMusicExplore: New albums & singles (albums), Trending (songs), New music videos
-      // - feMusicCharts:  Regional video charts, Language playlists
-      // - Global Charts:  FEmusic_charts with formData → ZZ (Global)
-      // - Pop/Hits:       FEmusic_moods_and_genres_category → Featured playlists
-      // - Feel Good:      FEmusic_moods_and_genres_category → Feeling happy playlists
-      final responses = await Future.wait([
-        constructRequest("browse", body: {"browseId": feMusicHome}),
-        constructRequest("browse", body: {"browseId": feMusicExplore})
-            .catchError((_) => null),
-        constructRequest("browse", body: {"browseId": feMusicCharts})
-            .catchError((_) => null),
-        // Global Charts
-        constructRequest("browse", body: {
-          "browseId": feMusicCharts,
-          "formData": {
-            "selectedValues": [
-              // "ZZ" (Global) form entity key from the charts country selector
-              "EidleHBsb3JlX2NoYXJ0c19jb3VudHJ5X21lbnVfMzE2NzY2NTY3WlogkQEoAQ%3D%3D"
-            ]
-          }
-        }).catchError((_) => null),
-        // Pop / Today's biggest pop hits
-        constructRequest("browse", body: {
-          "browseId": "FEmusic_moods_and_genres_category",
-          "params": "ggMPOg1uX1lLQkxHbHhWQUUy", // Pop genre
-        }).catchError((_) => null),
-        // Feel Good / Feeling happy
-        constructRequest("browse", body: {
-          "browseId": "FEmusic_moods_and_genres_category",
-          "params": "ggMPOg1uXzZQbDB5eThLRTQ3", // Feel good mood
-        }).catchError((_) => null),
-      ]);
-
-      // ── 2. Extract sections from all response feeds ────────────────────
       final sections = <dynamic>[];
 
-      // Feeds 0–2: Home, Explore, Local Charts — add all shelves as-is
-      for (final resp in responses.sublist(0, 3)) {
-        if (resp != null) {
+      if (_isAuthenticated) {
+        // Authenticated Session:
+        // feMusicHome contains the user's authentic personalized sections:
+        // Listen again, Quick picks, Mixed for you, Similar to <Artist>, Forgotten favorites, etc.
+        final homeResponse =
+            await constructRequest("browse", body: {"browseId": feMusicHome});
+
+        if (homeResponse != null) {
           sections.addAll(
-              traverseList(resp, ["sectionListRenderer", "contents"]));
+              traverseList(homeResponse, ["sectionListRenderer", "contents"]));
         }
-      }
 
-      // Helper to extract shelf title from a musicCarouselShelfBasicHeaderRenderer map
-      String shelfTitle(Map bhr) {
-        final runs = bhr['title']?['runs'];
-        if (runs is List && runs.isNotEmpty && runs[0] is Map) {
-          return (runs[0] as Map)['text']?.toString() ?? '';
-        }
-        return '';
-      }
+        // Follow continuation pages of feMusicHome to load all personalized shelves
+        dynamic continuation = _extractContinuationToken(homeResponse);
+        final seen = <String>{};
+        var pageCount = 0;
 
-      // Feed 3: Global Charts — rename "Video charts" to "Top Global Hits"
-      if (responses[3] != null) {
-        final globalShelves = traverseList(
-            responses[3], ["sectionListRenderer", "contents"]);
-        for (final s in globalShelves) {
-          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
-            final shelf = s['musicCarouselShelfRenderer'];
-            if (shelf is Map) {
-              final header = shelf['header'];
-              if (header is Map) {
-                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
-                if (bhr is Map) {
-                  final title = shelfTitle(bhr);
-                  if (title.toLowerCase().contains('video chart') ||
-                      title.toLowerCase().contains('chart')) {
-                    // Rename so it doesn't collide with local "Video charts"
-                    bhr['title'] = {
-                      'runs': [
-                        {'text': 'Top Global Hits'}
-                      ]
-                    };
-                    sections.add(s);
-                  }
-                }
+        while (continuation != null &&
+            continuation.toString().isNotEmpty &&
+            continuation.toString() != 'null' &&
+            pageCount < 4) {
+          if (!seen.add(continuation.toString())) break;
+          pageCount++;
+          try {
+            final contData = await constructRequest(
+              "browse",
+              body: {"continuation": continuation.toString()},
+            );
+
+            List<dynamic> newContents = [];
+            final contContents = contData?['continuationContents'];
+            if (contContents is Map) {
+              final slc = contContents['sectionListContinuation'];
+              if (slc is Map) {
+                final c = slc['contents'];
+                if (c is List) newContents = c;
               }
             }
-          }
-        }
-      }
 
-      // Feed 4: Pop — take only "Featured playlists" shelf, rename to "Today's Pop Hits"
-      if (responses[4] != null) {
-        final popShelves = traverseList(
-            responses[4], ["sectionListRenderer", "contents"]);
-        for (final s in popShelves) {
-          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
-            final shelf = s['musicCarouselShelfRenderer'];
-            if (shelf is Map) {
-              final header = shelf['header'];
-              if (header is Map) {
-                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
-                if (bhr is Map) {
-                  final title = shelfTitle(bhr);
-                  if (title.toLowerCase().contains('featured')) {
-                    bhr['title'] = {
-                      'runs': [
-                        {'text': "Today's Pop Hits"}
-                      ]
-                    };
-                    sections.add(s);
-                    break;
-                  }
-                }
+            if (newContents.isEmpty) {
+              final contents = contData?['contents'];
+              if (contents is Map &&
+                  contents.containsKey('sectionListContinuation')) {
+                final c = contents['sectionListContinuation']?['contents'];
+                if (c is List) newContents = c;
               }
             }
-          }
-        }
-      }
 
-      // Feed 5: Feel Good — take only "Feeling happy" / feel-good shelf
-      if (responses[5] != null) {
-        final fgShelves = traverseList(
-            responses[5], ["sectionListRenderer", "contents"]);
-        for (final s in fgShelves) {
-          if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
-            final shelf = s['musicCarouselShelfRenderer'];
-            if (shelf is Map) {
-              final header = shelf['header'];
-              if (header is Map) {
-                final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
-                if (bhr is Map) {
-                  final title = shelfTitle(bhr);
-                  if (title.toLowerCase().contains('feeling happy') ||
-                      title.toLowerCase().contains('feel-good')) {
-                    sections.add(s);
-                    break;
-                  }
-                }
+            if (newContents.isEmpty) {
+              newContents = traverseList(
+                  contData, ["sectionListContinuation", "contents"]);
+            }
+            if (newContents.isEmpty) {
+              newContents =
+                  traverseList(contData, ["sectionListRenderer", "contents"]);
+            }
+
+            for (final item in newContents) {
+              if (item is Map &&
+                  !item.containsKey('continuationItemRenderer')) {
+                sections.add(item);
               }
             }
+
+            continuation = _extractContinuationToken(contData);
+          } catch (_) {
+            break;
           }
         }
-      }
 
-      // ── 3. Follow continuation pages if available ──────────────────────
-      dynamic continuation = _extractContinuationToken(responses[0]);
-      final seen = <String>{};
-      var pageCount = 0;
-
-      while (continuation != null &&
-          continuation.toString().isNotEmpty &&
-          continuation.toString() != 'null' &&
-          pageCount < 3) {
-        if (!seen.add(continuation.toString())) break;
-        pageCount++;
+        // Also fetch Explore (New releases / Trending) to append at the end
         try {
-          final contData = await constructRequest("browse",
-              query: {"continuation": continuation.toString()});
+          final exploreResp = await constructRequest("browse",
+              body: {"browseId": feMusicExplore});
+          if (exploreResp != null) {
+            sections.addAll(
+                traverseList(exploreResp, ["sectionListRenderer", "contents"]));
+          }
+        } catch (_) {}
+      } else {
+        // Unauthenticated Guest Session:
+        // Aggregate across feMusicHome, Explore, Charts, Global Charts, Pop, and Feel Good
+        final responses = await Future.wait([
+          constructRequest("browse", body: {"browseId": feMusicHome}),
+          constructRequest("browse", body: {"browseId": feMusicExplore})
+              .catchError((_) => null),
+          constructRequest("browse", body: {"browseId": feMusicCharts})
+              .catchError((_) => null),
+          // Global Charts
+          constructRequest("browse", body: {
+            "browseId": feMusicCharts,
+            "formData": {
+              "selectedValues": [
+                "EidleHBsb3JlX2NoYXJ0c19jb3VudHJ5X21lbnVfMzE2NzY2NTY3WlogkQEoAQ%3D%3D"
+              ]
+            }
+          }).catchError((_) => null),
+          // Pop / Today's biggest pop hits
+          constructRequest("browse", body: {
+            "browseId": "FEmusic_moods_and_genres_category",
+            "params": "ggMPOg1uX1lLQkxHbHhWQUUy",
+          }).catchError((_) => null),
+          // Feel Good / Feeling happy
+          constructRequest("browse", body: {
+            "browseId": "FEmusic_moods_and_genres_category",
+            "params": "ggMPOg1uXzZQbDB5eThLRTQ3",
+          }).catchError((_) => null),
+        ]);
 
-          List<dynamic> newContents = [];
-          final contContents = contData?['continuationContents'];
-          if (contContents is Map) {
-            final slc = contContents['sectionListContinuation'];
-            if (slc is Map) {
-              final c = slc['contents'];
-              if (c is List) newContents = c;
+        for (final resp in responses.sublist(0, 3)) {
+          if (resp != null) {
+            sections.addAll(
+                traverseList(resp, ["sectionListRenderer", "contents"]));
+          }
+        }
+
+        // Helper to extract shelf title from a musicCarouselShelfBasicHeaderRenderer map
+        String shelfTitle(Map bhr) {
+          final runs = bhr['title']?['runs'];
+          if (runs is List && runs.isNotEmpty && runs[0] is Map) {
+            return (runs[0] as Map)['text']?.toString() ?? '';
+          }
+          return '';
+        }
+
+        // Feed 3: Global Charts
+        if (responses[3] != null) {
+          final globalShelves =
+              traverseList(responses[3], ["sectionListRenderer", "contents"]);
+          for (final s in globalShelves) {
+            if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+              final shelf = s['musicCarouselShelfRenderer'];
+              if (shelf is Map) {
+                final header = shelf['header'];
+                if (header is Map) {
+                  final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                  if (bhr is Map) {
+                    final title = shelfTitle(bhr);
+                    if (title.toLowerCase().contains('video chart') ||
+                        title.toLowerCase().contains('chart')) {
+                      bhr['title'] = {
+                        'runs': [
+                          {'text': 'Top Global Hits'}
+                        ]
+                      };
+                      sections.add(s);
+                    }
+                  }
+                }
+              }
             }
           }
+        }
 
-          if (newContents.isEmpty) {
-            newContents = traverseList(
-                contData, ["sectionListContinuation", "contents"]);
-          }
-
-          for (final item in newContents) {
-            if (item is Map &&
-                !item.containsKey('continuationItemRenderer')) {
-              sections.add(item);
+        // Feed 4: Pop
+        if (responses[4] != null) {
+          final popShelves =
+              traverseList(responses[4], ["sectionListRenderer", "contents"]);
+          for (final s in popShelves) {
+            if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+              final shelf = s['musicCarouselShelfRenderer'];
+              if (shelf is Map) {
+                final header = shelf['header'];
+                if (header is Map) {
+                  final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                  if (bhr is Map) {
+                    final title = shelfTitle(bhr);
+                    if (title.toLowerCase().contains('featured')) {
+                      bhr['title'] = {
+                        'runs': [
+                          {'text': "Today's Pop Hits"}
+                        ]
+                      };
+                      sections.add(s);
+                      break;
+                    }
+                  }
+                }
+              }
             }
           }
+        }
 
-          continuation = _extractContinuationToken(contData);
-        } catch (_) {
-          break;
+        // Feed 5: Feel Good
+        if (responses[5] != null) {
+          final fgShelves =
+              traverseList(responses[5], ["sectionListRenderer", "contents"]);
+          for (final s in fgShelves) {
+            if (s is Map && s.containsKey('musicCarouselShelfRenderer')) {
+              final shelf = s['musicCarouselShelfRenderer'];
+              if (shelf is Map) {
+                final header = shelf['header'];
+                if (header is Map) {
+                  final bhr = header['musicCarouselShelfBasicHeaderRenderer'];
+                  if (bhr is Map) {
+                    final title = shelfTitle(bhr);
+                    if (title.toLowerCase().contains('feeling happy') ||
+                        title.toLowerCase().contains('feel-good')) {
+                      sections.add(s);
+                      break;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // Continuation for guest feed
+        dynamic continuation = _extractContinuationToken(responses[0]);
+        final seen = <String>{};
+        var pageCount = 0;
+
+        while (continuation != null &&
+            continuation.toString().isNotEmpty &&
+            continuation.toString() != 'null' &&
+            pageCount < 3) {
+          if (!seen.add(continuation.toString())) break;
+          pageCount++;
+          try {
+            final contData = await constructRequest(
+              "browse",
+              body: {"continuation": continuation.toString()},
+            );
+
+            List<dynamic> newContents = [];
+            final contContents = contData?['continuationContents'];
+            if (contContents is Map) {
+              final slc = contContents['sectionListContinuation'];
+              if (slc is Map) {
+                final c = slc['contents'];
+                if (c is List) newContents = c;
+              }
+            }
+
+            if (newContents.isEmpty) {
+              final contents = contData?['contents'];
+              if (contents is Map &&
+                  contents.containsKey('sectionListContinuation')) {
+                final c = contents['sectionListContinuation']?['contents'];
+                if (c is List) newContents = c;
+              }
+            }
+
+            if (newContents.isEmpty) {
+              newContents = traverseList(
+                  contData, ["sectionListContinuation", "contents"]);
+            }
+            if (newContents.isEmpty) {
+              newContents =
+                  traverseList(contData, ["sectionListRenderer", "contents"]);
+            }
+
+            for (final item in newContents) {
+              if (item is Map &&
+                  !item.containsKey('continuationItemRenderer')) {
+                sections.add(item);
+              }
+            }
+
+            continuation = _extractContinuationToken(contData);
+          } catch (_) {
+            break;
+          }
         }
       }
 
-      // ── 4. Parse sections using the accurate parser ────────────────────
+      // 4. Parse sections using the accurate parser 
       final seenTitles = <String>{};
       final result = <HomeSection>[];
 

@@ -63,6 +63,8 @@ class Parser {
       shelf = data['musicImmersiveCarouselShelfRenderer'] as Map?;
     } else if (data.containsKey('gridRenderer')) {
       shelf = data['gridRenderer'] as Map?;
+    } else if (data.containsKey('musicShelfRenderer')) {
+      shelf = data['musicShelfRenderer'] as Map?;
     } else if (data.containsKey('musicDescriptionShelfRenderer')) {
       // Skip text-only shelves — they contain no playable content
       return null;
@@ -91,6 +93,11 @@ class Parser {
       final gridHeader = header['gridHeaderRenderer'];
       if (gridHeader is Map && title.isEmpty) {
         title = _extractRunText(gridHeader['title']) ?? '';
+      }
+      // Try musicShelfHeaderRenderer
+      final shelfHeader = header['musicShelfHeaderRenderer'];
+      if (shelfHeader is Map && title.isEmpty) {
+        title = _extractRunText(shelfHeader['title']) ?? '';
       }
       // Try musicCardShelfHeaderBasicRenderer
       final cardHeader = header['musicCardShelfHeaderBasicRenderer'];
@@ -414,8 +421,14 @@ class Parser {
   static String? _extractRunText(dynamic obj) {
     if (obj is Map) {
       final runs = obj['runs'];
-      if (runs is List && runs.isNotEmpty && runs[0] is Map) {
-        return runs[0]['text']?.toString();
+      if (runs is List && runs.isNotEmpty) {
+        final buffer = StringBuffer();
+        for (final r in runs) {
+          if (r is Map && r['text'] != null) {
+            buffer.write(r['text']);
+          }
+        }
+        if (buffer.isNotEmpty) return buffer.toString();
       }
       // Some objects just have a plain "text" field
       final text = obj['text'];
@@ -584,6 +597,12 @@ class Parser {
     final lower = raw.toLowerCase().trim();
 
     const knownMappings = <String, String>{
+      'listen again': 'listen_again',
+      'your favorites': 'listen_again',
+      'similar to': 'similar_to',
+      'from your library': 'from_your_library',
+      'forgotten favorites': 'forgotten_favorites',
+      'repeat rewind': 'repeat_rewind',
       'top pick': 'top_picks',
       'quick pick': 'top_picks',
       'recommended for you': 'recommended',
