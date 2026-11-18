@@ -1347,9 +1347,30 @@ class YTMusic {
   //  Each [HomeSection] has:
   //  - [HomeSection.title]       — localised display title (e.g. "Top picks")
   //  - [HomeSection.stableTitle] — locale-independent slug for reliable
-  //    programmatic matching (e.g. `"top_picks"`, `"trending"`, `"top_albums"`)
+  //    programmatic matching (e.g. `"quick_picks"`, `"top_picks"`, `"trending"`, `"top_albums"`)
   //  - [HomeSection.contents]    — list of [AlbumDetailed], [PlaylistDetailed],
   //    or [SongDetailed] items
+  Future<List<SongDetailed>> getQuickPicks({String? country}) async {
+    final sections = await getHome(country: country);
+    final quickPicksSection = sections.firstWhere(
+      (s) =>
+          s.stableTitle == 'quick_picks' ||
+          s.title.toLowerCase().contains('quick pick') ||
+          s.title.toLowerCase().contains('start radio'),
+      orElse: () => HomeSection(title: '', stableTitle: '', contents: []),
+    );
+    final songs = quickPicksSection.contents.whereType<SongDetailed>().toList();
+    if (songs.isNotEmpty) return songs;
+
+    final topPicksSection = sections.firstWhere(
+      (s) =>
+          s.stableTitle == 'top_picks' ||
+          s.title.toLowerCase().contains('top pick'),
+      orElse: () => HomeSection(title: '', stableTitle: '', contents: []),
+    );
+    return topPicksSection.contents.whereType<SongDetailed>().toList();
+  }
+
   Future<List<HomeSection>> getHome({String? country}) async {
     final String? previousGl = config['GL'];
     final String? previousHl = config['HL'];

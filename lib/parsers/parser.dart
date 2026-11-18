@@ -100,6 +100,11 @@ class Parser {
       if (shelfHeader is Map && title.isEmpty) {
         title = _extractRunText(shelfHeader['title']) ?? '';
       }
+      // Try musicHeaderRenderer
+      final musicHeader = header['musicHeaderRenderer'];
+      if (musicHeader is Map && title.isEmpty) {
+        title = _extractRunText(musicHeader['title']) ?? '';
+      }
       // Try musicCardShelfHeaderBasicRenderer
       final cardHeader = header['musicCardShelfHeaderBasicRenderer'];
       if (cardHeader is Map && title.isEmpty) {
@@ -654,12 +659,14 @@ class Parser {
       'from your library': 'from_your_library',
       'forgotten favorites': 'forgotten_favorites',
       'repeat rewind': 'repeat_rewind',
-      'top pick': 'quick_picks',
       'quick pick': 'quick_picks',
+      'quick picks': 'quick_picks',
       'start radio': 'quick_picks',
-      'recommended for you': 'quick_picks',
-      'recommended': 'quick_picks',
-      'our picks': 'quick_picks',
+      'top pick': 'top_picks',
+      'top picks': 'top_picks',
+      'recommended for you': 'recommended',
+      'recommended': 'recommended',
+      'our picks': 'top_picks',
       'trending': 'trending',
       // Global hits / charts — must come before the generic 'chart' key
       'top global hits': 'global_hits',
