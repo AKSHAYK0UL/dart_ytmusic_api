@@ -48,15 +48,23 @@ class SongParser {
     }
     final flexCols = renderer['flexColumns'] as List?;
     if (videoId.isEmpty && flexCols != null && flexCols.isNotEmpty) {
-      final col0 = flexCols[0];
-      if (col0 is Map) {
-        final runs = col0['musicResponsiveListItemFlexColumnRenderer']?['text']
+      for (final col in flexCols) {
+        if (col is! Map) continue;
+        final runs = col['musicResponsiveListItemFlexColumnRenderer']?['text']
             ?['runs'] as List?;
-        if (runs != null && runs.isNotEmpty && runs[0] is Map) {
-          videoId = runs[0]['navigationEndpoint']?['watchEndpoint']?['videoId']
-                  ?.toString() ??
-              '';
+        if (runs != null) {
+          for (final run in runs) {
+            if (run is Map) {
+              final vid = run['navigationEndpoint']?['watchEndpoint']?['videoId']
+                  ?.toString();
+              if (vid != null && vid.isNotEmpty) {
+                videoId = vid;
+                break;
+              }
+            }
+          }
         }
+        if (videoId.isNotEmpty) break;
       }
     }
     if (videoId.isEmpty) {
@@ -78,6 +86,12 @@ class SongParser {
           '';
     }
     if (videoId.isEmpty) {
+      videoId = renderer['thumbnailRenderer']?['musicThumbnailRenderer']
+              ?['navigationEndpoint']?['watchEndpoint']?['videoId']
+              ?.toString() ??
+          '';
+    }
+    if (videoId.isEmpty) {
       videoId = traverseString(renderer, ["watchEndpoint", "videoId"]) ??
           traverseString(renderer,
               ["playNavigationEndpoint", "watchEndpoint", "videoId"]) ??
@@ -95,6 +109,13 @@ class SongParser {
             .map((r) => r['text']?.toString() ?? '')
             .join('')
             .trim();
+      }
+      if (titleText.isEmpty) {
+        titleText = flexCols[0]['musicResponsiveListItemFlexColumnRenderer']
+                ?['text']?['simpleText']
+                ?.toString()
+                .trim() ??
+            '';
       }
     }
     if (titleText.isEmpty) {

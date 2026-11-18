@@ -88,7 +88,14 @@ class Parser {
       if (carouselHeader is Map) {
         title = _extractRunText(carouselHeader['title']) ??
             _extractRunText(carouselHeader['strapline']) ??
+            _extractRunText(carouselHeader['accessibilityData']) ??
             '';
+        final strapline = _extractRunText(carouselHeader['strapline']);
+        if (strapline != null &&
+            (strapline.toLowerCase().contains('start radio') ||
+                strapline.toLowerCase().contains('quick pick'))) {
+          if (title.isEmpty) title = strapline;
+        }
       }
       // Try gridHeaderRenderer
       final gridHeader = header['gridHeaderRenderer'];
@@ -120,23 +127,54 @@ class Parser {
     }
 
     // ── 3. Extract raw item list ─────────────────────────────────────────
-    // IMPORTANT: Access directly — do NOT use deep traversal here.
-    // traverseList recurses into sub-maps and picks up nested "contents" nodes.
+    // Directly collect items, unrolling any column/group wrappers
+    // (e.g. musicCarouselShelfColumnRenderer or nested items/contents lists)
     final rawItems = <dynamic>[];
+
+    void addRawItem(dynamic item) {
+      if (item is! Map) return;
+      if (item.containsKey('continuationItemRenderer')) return;
+
+      // Unroll column groups if present
+      for (final entry in item.entries) {
+        final val = entry.value;
+        if (val is Map) {
+          if (val.containsKey('items') && val['items'] is List) {
+            for (final sub in val['items'] as List) {
+              addRawItem(sub);
+            }
+            return;
+          }
+          if (val.containsKey('contents') && val['contents'] is List) {
+            for (final sub in val['contents'] as List) {
+              addRawItem(sub);
+            }
+            return;
+          }
+        }
+      }
+
+      if (item.containsKey('items') && item['items'] is List) {
+        for (final sub in item['items'] as List) {
+          addRawItem(sub);
+        }
+        return;
+      }
+
+      rawItems.add(item);
+    }
+
     final contentsRaw = shelf['contents'];
     if (contentsRaw is List) {
       for (final item in contentsRaw) {
-        // Skip continuationItemRenderer entries
-        if (item is Map && item.containsKey('continuationItemRenderer')) continue;
-        rawItems.add(item);
+        addRawItem(item);
       }
     }
     // gridRenderer uses "items" instead of "contents"
     final itemsRaw = shelf['items'];
     if (itemsRaw is List) {
       for (final item in itemsRaw) {
-        if (item is Map && item.containsKey('continuationItemRenderer')) continue;
-        rawItems.add(item);
+        addRawItem(item);
       }
     }
 
@@ -358,7 +396,10 @@ class Parser {
     dynamic albumRun;
     for (final r in subtitleRuns) {
       if (r is Map && r.containsKey('navigationEndpoint')) {
-        final bId = _deepGet(r, ['navigationEndpoint', 'browseEndpoint', 'browseId'])?.toString() ?? '';
+        final bId =
+            _deepGet(r, ['navigationEndpoint', 'browseEndpoint', 'browseId'])
+                    ?.toString() ??
+                '';
         if (bId.startsWith('MPREb_') || bId.startsWith('OLAK')) {
           albumRun = r;
           break;
@@ -373,13 +414,22 @@ class Parser {
       artist: ArtistBasic(
         name: artistRun is Map ? (artistRun['text']?.toString() ?? '') : '',
         artistId: artistRun is Map
-            ? _deepGet(artistRun, ['navigationEndpoint', 'browseEndpoint', 'browseId'])?.toString()
+            ? _deepGet(artistRun, [
+                'navigationEndpoint',
+                'browseEndpoint',
+                'browseId'
+              ])?.toString()
             : null,
       ),
       album: albumRun is Map
           ? AlbumBasic(
               name: albumRun['text']?.toString() ?? '',
-              albumId: _deepGet(albumRun, ['navigationEndpoint', 'browseEndpoint', 'browseId'])?.toString() ?? '',
+              albumId: _deepGet(albumRun, [
+                    'navigationEndpoint',
+                    'browseEndpoint',
+                    'browseId'
+                  ])?.toString() ??
+                  '',
             )
           : null,
       duration: null, // not available in home page cards
@@ -436,11 +486,14 @@ class Parser {
   }
 
   static List<ThumbnailFull> _thumbsFromList(List thumbs) {
-    return thumbs.whereType<Map>().map((t) => ThumbnailFull(
-      url: t['url']?.toString() ?? '',
-      width: (t['width'] as num?)?.toInt() ?? 0,
-      height: (t['height'] as num?)?.toInt() ?? 0,
-    )).toList();
+    return thumbs
+        .whereType<Map>()
+        .map((t) => ThumbnailFull(
+              url: t['url']?.toString() ?? '',
+              width: (t['width'] as num?)?.toInt() ?? 0,
+              height: (t['height'] as num?)?.toInt() ?? 0,
+            ))
+        .toList();
   }
 
   /// Safely gets a nested value by explicit key path. Supports Map keys and List indices.
@@ -485,9 +538,13 @@ class Parser {
         }
         if (buffer.isNotEmpty) return buffer.toString();
       }
-      // Some objects just have a plain "text" field
-      final text = obj['text'];
+      // Some objects just have a plain "text" or "simpleText" field
+      final text = obj['text'] ?? obj['simpleText'];
       if (text is String && text.isNotEmpty) return text;
+
+      // Check accessibility label
+      final aria = obj['accessibility']?['accessibilityData']?['label'];
+      if (aria is String && aria.isNotEmpty) return aria;
     }
     if (obj is String && obj.isNotEmpty) return obj;
     return null;
@@ -577,13 +634,14 @@ class Parser {
                   '';
               final navEpMap = renderer['navigationEndpoint'];
               final playlistId = ((navEpMap is Map &&
-                      navEpMap['watchPlaylistEndpoint'] is Map)
-                  ? navEpMap['watchPlaylistEndpoint']['playlistId']?.toString()
-                  : (traverseString(
-                          renderer, ["watchPlaylistEndpoint", "playlistId"]) ??
-                      traverseString(
-                          renderer, ["thumbnailOverlay", "playlistId"]) ??
-                      traverseString(renderer, ["playlistId"]))) ??
+                          navEpMap['watchPlaylistEndpoint'] is Map)
+                      ? navEpMap['watchPlaylistEndpoint']['playlistId']
+                          ?.toString()
+                      : (traverseString(renderer,
+                              ["watchPlaylistEndpoint", "playlistId"]) ??
+                          traverseString(
+                              renderer, ["thumbnailOverlay", "playlistId"]) ??
+                          traverseString(renderer, ["playlistId"]))) ??
                   '';
               final subtitleRuns = renderer['subtitle'] is Map
                   ? (renderer['subtitle']['runs'] as List? ?? [])

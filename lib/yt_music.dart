@@ -1100,6 +1100,87 @@ class YTMusic {
     return null;
   }
 
+  /// Extracts continuation token specifically for a section list (home/feed browse).
+  /// This prevents recursing into individual carousel items (which could hijack the feed pagination).
+  static String? _extractSectionListContinuationToken(dynamic data) {
+    if (data == null) return null;
+
+    if (data is Map) {
+      // 1. Direct sectionListContinuation from a continuation response
+      final contContents = data['continuationContents'];
+      if (contContents is Map) {
+        final slc = contContents['sectionListContinuation'];
+        if (slc is Map) {
+          final token = _tokenFromSectionList(slc);
+          if (token != null) return token;
+        }
+      }
+
+      if (data.containsKey('sectionListContinuation') &&
+          data['sectionListContinuation'] is Map) {
+        final token = _tokenFromSectionList(data['sectionListContinuation']);
+        if (token != null) return token;
+      }
+
+      // 2. sectionListRenderer inside browse response tabs
+      final tabs = traverseList(data, [
+        "contents",
+        "singleColumnBrowseResultsRenderer",
+        "tabs",
+      ]);
+      for (final tab in tabs) {
+        if (tab is Map) {
+          final slr =
+              traverse(tab, ["tabRenderer", "content", "sectionListRenderer"]);
+          if (slr is Map) {
+            final token = _tokenFromSectionList(slr);
+            if (token != null) return token;
+          }
+        }
+      }
+
+      final directSlr = traverse(data, ["sectionListRenderer"]);
+      if (directSlr is Map) {
+        final token = _tokenFromSectionList(directSlr);
+        if (token != null) return token;
+      }
+    }
+
+    // Fallback to recursive search if not found directly
+    return _extractContinuationToken(data);
+  }
+
+  static String? _tokenFromSectionList(Map sl) {
+    // Check sl['continuations']
+    final continuations = sl['continuations'];
+    if (continuations is List && continuations.isNotEmpty) {
+      for (final c in continuations) {
+        if (c is Map) {
+          final token = c['nextContinuationData']?['continuation'] ??
+              c['reloadContinuationData']?['continuation'];
+          if (token != null && token.toString().isNotEmpty) {
+            return token.toString();
+          }
+        }
+      }
+    }
+
+    // Check last items in sl['contents'] for continuationItemRenderer
+    final contents = sl['contents'];
+    if (contents is List && contents.isNotEmpty) {
+      for (int i = contents.length - 1; i >= 0; i--) {
+        final item = contents[i];
+        if (item is Map && item.containsKey('continuationItemRenderer')) {
+          final endpoint =
+              item['continuationItemRenderer']?['continuationEndpoint'];
+          final token = _tokenFromContinuationEndpoint(endpoint);
+          if (token != null && token.isNotEmpty) return token;
+        }
+      }
+    }
+    return null;
+  }
+
   /// Optimized Data API v3 fallback:
   /// Requests 'part=snippet,contentDetails' on playlistItems so metadata is retrieved immediately,
   /// then fetches only 'part=contentDetails' (duration) in parallel batches from videos.list.
@@ -1352,29 +1433,60 @@ class YTMusic {
   //    or [SongDetailed] items
   Future<List<SongDetailed>> getQuickPicks({String? country}) async {
     final sections = await getHome(country: country);
-    final quickPicksSection = sections.firstWhere(
-      (s) =>
-          s.stableTitle == 'quick_picks' ||
-          s.title.toLowerCase().contains('quick pick') ||
-          s.title.toLowerCase().contains('start radio'),
-      orElse: () => HomeSection(title: '', stableTitle: '', contents: []),
-    );
-    final songs = quickPicksSection.contents.whereType<SongDetailed>().toList();
-    if (songs.isNotEmpty) return songs;
 
-    final topPicksSection = sections.firstWhere(
-      (s) =>
-          s.stableTitle == 'top_picks' ||
-          s.title.toLowerCase().contains('top pick'),
-      orElse: () => HomeSection(title: '', stableTitle: '', contents: []),
-    );
-    return topPicksSection.contents.whereType<SongDetailed>().toList();
+    // 1. YouTube Music authentic "Quick picks" shelf
+    for (final s in sections) {
+      final isMatch = s.stableTitle == 'quick_picks' ||
+          s.title.toLowerCase().contains('quick pick') ||
+          s.title.toLowerCase().contains('start radio');
+      if (isMatch) {
+        final songs = s.contents.whereType<SongDetailed>().toList();
+        if (songs.length >= 4) return songs;
+      }
+    }
+
+    // 2. Large authentic song carousel (Quick picks typically has 16-20 songs)
+    for (final s in sections) {
+      final songs = s.contents.whereType<SongDetailed>().toList();
+      if (songs.length >= 8) return songs;
+    }
+
+    // 3. Any quick_picks match with songs
+    for (final s in sections) {
+      final isMatch = s.stableTitle == 'quick_picks' ||
+          s.title.toLowerCase().contains('quick pick') ||
+          s.title.toLowerCase().contains('start radio');
+      if (isMatch) {
+        final songs = s.contents.whereType<SongDetailed>().toList();
+        if (songs.isNotEmpty) return songs;
+      }
+    }
+
+    // 4. top_picks / recommended
+    for (final s in sections) {
+      final isMatch = s.stableTitle == 'top_picks' ||
+          s.stableTitle == 'recommended' ||
+          s.title.toLowerCase().contains('top pick');
+      if (isMatch) {
+        final songs = s.contents.whereType<SongDetailed>().toList();
+        if (songs.isNotEmpty) return songs;
+      }
+    }
+
+    // 5. Any shelf with songs
+    for (final s in sections) {
+      final songs = s.contents.whereType<SongDetailed>().toList();
+      if (songs.isNotEmpty) return songs;
+    }
+
+    return const [];
   }
 
   Future<List<HomeSection>> getHome({String? country}) async {
     final String? previousGl = config['GL'];
     final String? previousHl = config['HL'];
 
+    config['HL'] = 'en';
     if (country != null) {
       final resolved =
           country.toLowerCase() == 'global' ? 'US' : country.toUpperCase();
@@ -1405,7 +1517,7 @@ class YTMusic {
         }
 
         // Follow continuation pages of feMusicHome to load all personalized shelves
-        dynamic continuation = _extractContinuationToken(homeResponse);
+        dynamic continuation = _extractSectionListContinuationToken(homeResponse);
         final seen = <String>{};
         var pageCount = 0;
 
@@ -1418,6 +1530,11 @@ class YTMusic {
           try {
             final contData = await constructRequest(
               "browse",
+              query: {
+                "continuation": continuation.toString(),
+                "ctoken": continuation.toString(),
+                "type": "next",
+              },
               body: {"continuation": continuation.toString()},
             );
 
@@ -1456,7 +1573,7 @@ class YTMusic {
               }
             }
 
-            continuation = _extractContinuationToken(contData);
+            continuation = _extractSectionListContinuationToken(contData);
           } catch (_) {
             break;
           }
@@ -1601,7 +1718,7 @@ class YTMusic {
         }
 
         // Continuation for guest feed
-        dynamic continuation = _extractContinuationToken(responses[0]);
+        dynamic continuation = _extractSectionListContinuationToken(responses[0]);
         final seen = <String>{};
         var pageCount = 0;
 
@@ -1614,6 +1731,11 @@ class YTMusic {
           try {
             final contData = await constructRequest(
               "browse",
+              query: {
+                "continuation": continuation.toString(),
+                "ctoken": continuation.toString(),
+                "type": "next",
+              },
               body: {"continuation": continuation.toString()},
             );
 
@@ -1652,7 +1774,7 @@ class YTMusic {
               }
             }
 
-            continuation = _extractContinuationToken(contData);
+            continuation = _extractSectionListContinuationToken(contData);
           } catch (_) {
             break;
           }
@@ -1668,9 +1790,27 @@ class YTMusic {
           final section = Parser.parseHomeSection(item);
           if (section == null) continue;
           if (section.contents.isEmpty) continue;
-          final cleanTitle = section.title.toLowerCase().trim();
-          if (cleanTitle.isEmpty || !seenTitles.add(cleanTitle)) continue;
-          result.add(section);
+          final cleanTitle = section.title.toLowerCase().trim().isNotEmpty
+              ? section.title.toLowerCase().trim()
+              : section.stableTitle;
+          if (cleanTitle.isEmpty) continue;
+
+          final existingIdx = result.indexWhere((e) {
+            final eTitle = e.title.toLowerCase().trim().isNotEmpty
+                ? e.title.toLowerCase().trim()
+                : e.stableTitle;
+            return eTitle == cleanTitle ||
+                (e.stableTitle.isNotEmpty && e.stableTitle == section.stableTitle);
+          });
+
+          if (existingIdx == -1) {
+            seenTitles.add(cleanTitle);
+            result.add(section);
+          } else if (section.contents.length >
+              result[existingIdx].contents.length) {
+            // Replace with fuller section if continuation returned more items
+            result[existingIdx] = section;
+          }
         } catch (_) {
           continue;
         }
@@ -1684,9 +1824,11 @@ class YTMusic {
         } else {
           config.remove('GL');
         }
-        if (previousHl != null) {
-          config['HL'] = previousHl;
-        }
+      }
+      if (previousHl != null) {
+        config['HL'] = previousHl;
+      } else {
+        config.remove('HL');
       }
     }
   }
