@@ -251,15 +251,13 @@ class Parser {
     }
 
     // Also try navigationEndpoint directly on the renderer
-    if (pageType == null) {
-      pageType = _deepGet(data, [
-        'navigationEndpoint',
-        'browseEndpoint',
-        'browseEndpointContextSupportedConfigs',
-        'browseEndpointContextMusicConfig',
-        'pageType',
-      ])?.toString();
-    }
+    pageType ??= _deepGet(data, [
+      'navigationEndpoint',
+      'browseEndpoint',
+      'browseEndpointContextSupportedConfigs',
+      'browseEndpointContextMusicConfig',
+      'pageType',
+    ])?.toString();
 
     // ── Check for videoId (playable song) FIRST ──────────────────────────
     // Tracks on YouTube Music carry a watchEndpoint with a videoId.
