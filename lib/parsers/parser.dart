@@ -218,32 +218,45 @@ class Parser {
       ])?.toString();
     }
 
+    // ── Check for videoId (playable song) FIRST ──────────────────────────
+    // Tracks on YouTube Music carry a watchEndpoint with a videoId.
+    // videoId MUST take priority so songs are parsed as SongDetailed even if
+    // YouTube embeds a radio playlistId (RD...) or assigns a track pageType.
+    final videoId = _deepGet(data, [
+          'title',
+          'runs',
+          0,
+          'navigationEndpoint',
+          'watchEndpoint',
+          'videoId',
+        ])?.toString() ??
+        _deepGet(data, [
+          'navigationEndpoint',
+          'watchEndpoint',
+          'videoId',
+        ])?.toString() ??
+        _deepGet(data, [
+          'thumbnailOverlay',
+          'musicItemThumbnailOverlayRenderer',
+          'content',
+          'musicPlayButtonRenderer',
+          'playNavigationEndpoint',
+          'watchEndpoint',
+          'videoId',
+        ])?.toString() ??
+        _deepGet(data, [
+          'onTap',
+          'watchEndpoint',
+          'videoId',
+        ])?.toString();
+
+    if (videoId != null && videoId.isNotEmpty) {
+      return _parseTwoRowAsSong(data, videoId);
+    }
+
     // ── Route by pageType ─────────────────────────────────────────────────
     if (pageType == null) {
-      // 1. Check for videoId (playable song) FIRST.
-      // Songs on YouTube Music typically carry a watchEndpoint with a videoId
-      // and an accompanying radio playlistId (RD...). videoId MUST take priority
-      // over playlistId so tracks are parsed as SongDetailed, not playlists!
-      final videoId = _deepGet(data, [
-        'navigationEndpoint',
-        'watchEndpoint',
-        'videoId',
-      ])?.toString() ??
-      _deepGet(data, [
-        'thumbnailOverlay',
-        'musicItemThumbnailOverlayRenderer',
-        'content',
-        'musicPlayButtonRenderer',
-        'playNavigationEndpoint',
-        'watchEndpoint',
-        'videoId',
-      ])?.toString();
-
-      if (videoId != null && videoId.isNotEmpty) {
-        return _parseTwoRowAsSong(data, videoId);
-      }
-
-      // 2. If no videoId, check for playlist/mix (e.g. My Supermix, radio)
+      // If no videoId, check for playlist/mix (e.g. My Supermix, radio)
       final watchPlaylistId = _deepGet(data, [
             'navigationEndpoint',
             'watchPlaylistEndpoint',
@@ -260,6 +273,14 @@ class Parser {
       }
 
       // No playable endpoint found — skip
+      return null;
+    }
+
+    if (pageType == 'MUSIC_PAGE_TYPE_TRACK') {
+      final vId = traverseString(data, ['watchEndpoint', 'videoId']);
+      if (vId != null && vId.isNotEmpty) {
+        return _parseTwoRowAsSong(data, vId);
+      }
       return null;
     }
 
@@ -417,11 +438,18 @@ class Parser {
     )).toList();
   }
 
-  /// Safely gets a nested value by explicit key path. No recursion.
-  static dynamic _deepGet(dynamic root, List<String> keys) {
+  /// Safely gets a nested value by explicit key path. Supports Map keys and List indices.
+  static dynamic _deepGet(dynamic root, List<dynamic> keys) {
     dynamic current = root;
     for (final key in keys) {
-      if (current is Map) {
+      if (current == null) return null;
+      if (key is int) {
+        if (current is List && key >= 0 && key < current.length) {
+          current = current[key];
+        } else {
+          return null;
+        }
+      } else if (current is Map) {
         current = current[key];
       } else {
         return null;
@@ -621,13 +649,16 @@ class Parser {
     const knownMappings = <String, String>{
       'listen again': 'listen_again',
       'your favorites': 'listen_again',
+      'speed dial': 'speed_dial',
       'similar to': 'similar_to',
       'from your library': 'from_your_library',
       'forgotten favorites': 'forgotten_favorites',
       'repeat rewind': 'repeat_rewind',
       'top pick': 'top_picks',
       'quick pick': 'top_picks',
+      'start radio': 'top_picks',
       'recommended for you': 'recommended',
+      'recommended': 'recommended',
       'our picks': 'top_picks',
       'trending': 'trending',
       // Global hits / charts — must come before the generic 'chart' key
@@ -652,6 +683,8 @@ class Parser {
       'mixed for you': 'mixed_for_you',
       'mix for you': 'mixed_for_you',
       'your mix': 'mixed_for_you',
+      'my supermix': 'mixed_for_you',
+      'supermix': 'mixed_for_you',
       // Pop/mood/feel-good — specific keys first
       "today's pop hits": 'pop_hits',
       'pop hit': 'pop_hits',

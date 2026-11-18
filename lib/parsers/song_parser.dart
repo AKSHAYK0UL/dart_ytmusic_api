@@ -24,52 +24,188 @@ class SongParser {
   }
 
   static SongDetailed parseSearchResult(dynamic item) {
-    final videoId = traverseString(item, ["watchEndpoint", "videoId"]) ??
-        traverseString(
-            item, ["playNavigationEndpoint", "watchEndpoint", "videoId"]) ??
-        '';
+    final renderer =
+        (item is Map && item.containsKey('musicResponsiveListItemRenderer'))
+            ? item['musicResponsiveListItemRenderer'] as Map
+            : (item is Map ? item : null);
 
-    final columns = traverseList(item, ["flexColumns", "runs"]);
+    if (renderer == null) {
+      return SongDetailed(
+        type: "SONG",
+        videoId: '',
+        name: '',
+        artist: ArtistBasic(name: ''),
+        album: null,
+        duration: null,
+        thumbnails: const [],
+      );
+    }
+
+    // 1. Direct, robust videoId extraction
+    String videoId = '';
+    if (renderer['playlistItemData'] is Map) {
+      videoId = renderer['playlistItemData']['videoId']?.toString() ?? '';
+    }
+    final flexCols = renderer['flexColumns'] as List?;
+    if (videoId.isEmpty && flexCols != null && flexCols.isNotEmpty) {
+      final col0 = flexCols[0];
+      if (col0 is Map) {
+        final runs = col0['musicResponsiveListItemFlexColumnRenderer']?['text']
+            ?['runs'] as List?;
+        if (runs != null && runs.isNotEmpty && runs[0] is Map) {
+          videoId = runs[0]['navigationEndpoint']?['watchEndpoint']?['videoId']
+                  ?.toString() ??
+              '';
+        }
+      }
+    }
+    if (videoId.isEmpty) {
+      videoId = renderer['overlay']?['musicItemThumbnailOverlayRenderer']
+              ?['content']?['musicPlayButtonRenderer']?['playNavigationEndpoint']
+          ?['watchEndpoint']?['videoId']
+          ?.toString() ??
+          '';
+    }
+    if (videoId.isEmpty) {
+      videoId = renderer['navigationEndpoint']?['watchEndpoint']?['videoId']
+              ?.toString() ??
+          '';
+    }
+    if (videoId.isEmpty) {
+      videoId = renderer['onTap']?['watchEndpoint']?['videoId']?.toString() ??
+          renderer['doubleTapCommand']?['watchEndpoint']?['videoId']
+              ?.toString() ??
+          '';
+    }
+    if (videoId.isEmpty) {
+      videoId = traverseString(renderer, ["watchEndpoint", "videoId"]) ??
+          traverseString(renderer,
+              ["playNavigationEndpoint", "watchEndpoint", "videoId"]) ??
+          '';
+    }
+
+    // 2. Direct, robust title extraction from flexColumns[0]
     String titleText = '';
+    if (flexCols != null && flexCols.isNotEmpty && flexCols[0] is Map) {
+      final runs = flexCols[0]['musicResponsiveListItemFlexColumnRenderer']
+          ?['text']?['runs'] as List?;
+      if (runs != null && runs.isNotEmpty) {
+        titleText = runs
+            .whereType<Map>()
+            .map((r) => r['text']?.toString() ?? '')
+            .join('')
+            .trim();
+      }
+    }
+    if (titleText.isEmpty) {
+      titleText = traverseString(renderer, ["title", "runs", "text"]) ??
+          traverseString(renderer, ["title", "text"]) ??
+          '';
+    }
+
+    // 3. Subtitle extraction (artist, album, duration) from flexColumns[1]
     String artistName = '';
     String? artistId;
     String? albumName;
     String? albumId;
     String? durationText;
 
-    if (columns.isNotEmpty) {
-      final first = columns.first;
-      if (first is Map) {
-        titleText = first['text']?.toString() ?? '';
-      }
-      for (int i = 1; i < columns.length; i++) {
-        final c = columns[i];
-        if (c is! Map) continue;
-        final text = c['text']?.toString() ?? '';
-        if (text == ' • ' || text.trim().isEmpty) continue;
+    if (flexCols != null && flexCols.length > 1 && flexCols[1] is Map) {
+      final runs = flexCols[1]['musicResponsiveListItemFlexColumnRenderer']
+          ?['text']?['runs'] as List?;
+      if (runs != null) {
+        for (final r in runs) {
+          if (r is! Map) continue;
+          final text = r['text']?.toString() ?? '';
+          if (text == ' • ' || text.trim().isEmpty) continue;
 
-        if (isDuration(c)) {
-          durationText = text;
-        } else if (isArtist(c)) {
-          artistName = text;
-          artistId = traverseString(c, ["browseId"]);
-        } else if (isAlbum(c)) {
-          albumName = text;
-          albumId = traverseString(c, ["browseId"]);
-        } else if (artistName.isEmpty && !isDuration(c)) {
-          artistName = text;
-          artistId = traverseString(c, ["browseId"]);
-        } else if (albumName == null && !isDuration(c)) {
-          albumName = text;
-          albumId = traverseString(c, ["browseId"]);
+          final pageType = _deepGet(r, [
+                'navigationEndpoint',
+                'browseEndpoint',
+                'browseEndpointContextSupportedConfigs',
+                'browseEndpointContextMusicConfig',
+                'pageType',
+              ])?.toString() ??
+              traverseString(r, ["pageType"]);
+
+          final browseId = _deepGet(r, [
+                'navigationEndpoint',
+                'browseEndpoint',
+                'browseId',
+              ])?.toString() ??
+              traverseString(r, ["browseId"]);
+
+          if (RegExp(r'(\d{1,2}:)?\d{1,2}:\d{1,2}').hasMatch(text)) {
+            durationText = text;
+          } else if (pageType == 'MUSIC_PAGE_TYPE_ARTIST' ||
+              pageType == 'MUSIC_PAGE_TYPE_USER_CHANNEL' ||
+              (browseId != null && browseId.startsWith('UC'))) {
+            if (artistName.isEmpty) {
+              artistName = text;
+              artistId = browseId;
+            }
+          } else if (pageType == 'MUSIC_PAGE_TYPE_ALBUM' ||
+              (browseId != null &&
+                  (browseId.startsWith('MPREb_') ||
+                      browseId.startsWith('OLAK')))) {
+            if (albumName == null) {
+              albumName = text;
+              albumId = browseId;
+            }
+          } else if (artistName.isEmpty) {
+            artistName = text;
+            artistId = browseId;
+          } else if (albumName == null) {
+            albumName = text;
+            albumId = browseId;
+          }
         }
       }
     }
 
-    if (titleText.isEmpty) {
-      titleText = traverseString(item, ["title", "runs", "text"]) ??
-          traverseString(item, ["title", "text"]) ??
-          '';
+    // Check fixedColumns for duration if not found in flexColumns
+    if (durationText == null) {
+      final fixedCols = renderer['fixedColumns'] as List?;
+      if (fixedCols != null && fixedCols.isNotEmpty && fixedCols[0] is Map) {
+        final runs = fixedCols[0]['musicResponsiveListItemFixedColumnRenderer']
+            ?['text']?['runs'] as List?;
+        if (runs != null && runs.isNotEmpty && runs[0] is Map) {
+          durationText = runs[0]['text']?.toString();
+        }
+      }
+    }
+
+    // Fallback: If artistName is still empty, try deep search
+    if (artistName.isEmpty) {
+      final columns = traverseList(renderer, ["flexColumns", "runs"]);
+      for (final c in columns) {
+        if (c is! Map) continue;
+        final text = c['text']?.toString() ?? '';
+        if (text == ' • ' || text.trim().isEmpty || text == titleText) continue;
+        if (isArtist(c)) {
+          artistName = text;
+          artistId = traverseString(c, ["browseId"]);
+          break;
+        }
+      }
+    }
+
+    // 4. Thumbnails extraction
+    List<ThumbnailFull> thumbnails = [];
+    final thumbObj = renderer['thumbnail']?['musicThumbnailRenderer']
+            ?['thumbnail']?['thumbnails'] ??
+        renderer['thumbnails'];
+    if (thumbObj is List) {
+      thumbnails = thumbObj
+          .whereType<Map>()
+          .map((t) => ThumbnailFull.fromMap(t))
+          .toList();
+    }
+    if (thumbnails.isEmpty) {
+      thumbnails = traverseList(renderer, ["thumbnails"])
+          .whereType<Map>()
+          .map((item) => ThumbnailFull.fromMap(item))
+          .toList();
     }
 
     return SongDetailed(
@@ -87,10 +223,28 @@ class SongParser {
             )
           : null,
       duration: Parser.parseDuration(durationText),
-      thumbnails: traverseList(item, ["thumbnails"])
-          .map((item) => ThumbnailFull.fromMap(item))
-          .toList(),
+      thumbnails: thumbnails,
     );
+  }
+
+  static dynamic _deepGet(dynamic current, List<dynamic> path) {
+    for (final segment in path) {
+      if (current == null) return null;
+      if (segment is int) {
+        if (current is List && segment >= 0 && segment < current.length) {
+          current = current[segment];
+        } else {
+          return null;
+        }
+      } else {
+        if (current is Map) {
+          current = current[segment];
+        } else {
+          return null;
+        }
+      }
+    }
+    return current;
   }
 
   static SongDetailed parseArtistSong(dynamic item, ArtistBasic artistBasic) {
