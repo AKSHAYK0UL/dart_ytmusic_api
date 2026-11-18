@@ -78,6 +78,7 @@ class Parser {
     // ── 2. Extract the shelf title ───────────────────────────────────────
     // Carousel headers live at shelf.header.musicCarouselShelfBasicHeaderRenderer.title.runs[0].text
     // Grid headers live at shelf.header.gridHeaderRenderer.title.runs[0].text
+    // musicShelfRenderer headers live at shelf.title.runs[0].text
     String title = '';
 
     final header = shelf['header'];
@@ -104,6 +105,13 @@ class Parser {
       if (cardHeader is Map && title.isEmpty) {
         title = cardHeader['title']?.toString() ?? '';
       }
+    }
+
+    // Direct title on shelf (standard for musicShelfRenderer like Quick picks)
+    if (title.isEmpty) {
+      title = _extractRunText(shelf['title']) ??
+          _extractRunText(shelf['strapline']) ??
+          '';
     }
 
     // ── 3. Extract raw item list ─────────────────────────────────────────
@@ -212,7 +220,30 @@ class Parser {
 
     // ── Route by pageType ─────────────────────────────────────────────────
     if (pageType == null) {
-      // No browse pageType — check for watchPlaylistEndpoint (playlist/mix) or videoId (song)
+      // 1. Check for videoId (playable song) FIRST.
+      // Songs on YouTube Music typically carry a watchEndpoint with a videoId
+      // and an accompanying radio playlistId (RD...). videoId MUST take priority
+      // over playlistId so tracks are parsed as SongDetailed, not playlists!
+      final videoId = _deepGet(data, [
+        'navigationEndpoint',
+        'watchEndpoint',
+        'videoId',
+      ])?.toString() ??
+      _deepGet(data, [
+        'thumbnailOverlay',
+        'musicItemThumbnailOverlayRenderer',
+        'content',
+        'musicPlayButtonRenderer',
+        'playNavigationEndpoint',
+        'watchEndpoint',
+        'videoId',
+      ])?.toString();
+
+      if (videoId != null && videoId.isNotEmpty) {
+        return _parseTwoRowAsSong(data, videoId);
+      }
+
+      // 2. If no videoId, check for playlist/mix (e.g. My Supermix, radio)
       final watchPlaylistId = _deepGet(data, [
             'navigationEndpoint',
             'watchPlaylistEndpoint',
@@ -226,15 +257,6 @@ class Parser {
 
       if (watchPlaylistId != null && watchPlaylistId.isNotEmpty) {
         return _parseTwoRowAsPlaylist(data, watchPlaylistId);
-      }
-
-      final videoId = _deepGet(data, [
-        'navigationEndpoint',
-        'watchEndpoint',
-        'videoId',
-      ])?.toString();
-      if (videoId != null && videoId.isNotEmpty) {
-        return _parseTwoRowAsSong(data, videoId);
       }
 
       // No playable endpoint found — skip

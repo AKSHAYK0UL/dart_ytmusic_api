@@ -24,30 +24,69 @@ class SongParser {
   }
 
   static SongDetailed parseSearchResult(dynamic item) {
+    final videoId = traverseString(item, ["watchEndpoint", "videoId"]) ??
+        traverseString(
+            item, ["playNavigationEndpoint", "watchEndpoint", "videoId"]) ??
+        '';
+
     final columns = traverseList(item, ["flexColumns", "runs"]);
-    // It is not possible to identify the title and author
-    final title = columns[0];
-    final artist = columns.firstWhere(isArtist, orElse: () => columns[3]);
-    final album = columns.firstWhere(isAlbum, orElse: () => null);
-    final duration = columns.firstWhere(
-        (item) => isDuration(item) && item != title,
-        orElse: () => null);
+    String titleText = '';
+    String artistName = '';
+    String? artistId;
+    String? albumName;
+    String? albumId;
+    String? durationText;
+
+    if (columns.isNotEmpty) {
+      final first = columns.first;
+      if (first is Map) {
+        titleText = first['text']?.toString() ?? '';
+      }
+      for (int i = 1; i < columns.length; i++) {
+        final c = columns[i];
+        if (c is! Map) continue;
+        final text = c['text']?.toString() ?? '';
+        if (text == ' • ' || text.trim().isEmpty) continue;
+
+        if (isDuration(c)) {
+          durationText = text;
+        } else if (isArtist(c)) {
+          artistName = text;
+          artistId = traverseString(c, ["browseId"]);
+        } else if (isAlbum(c)) {
+          albumName = text;
+          albumId = traverseString(c, ["browseId"]);
+        } else if (artistName.isEmpty && !isDuration(c)) {
+          artistName = text;
+          artistId = traverseString(c, ["browseId"]);
+        } else if (albumName == null && !isDuration(c)) {
+          albumName = text;
+          albumId = traverseString(c, ["browseId"]);
+        }
+      }
+    }
+
+    if (titleText.isEmpty) {
+      titleText = traverseString(item, ["title", "runs", "text"]) ??
+          traverseString(item, ["title", "text"]) ??
+          '';
+    }
 
     return SongDetailed(
       type: "SONG",
-      videoId: traverseString(item, ["watchEndpoint", "videoId"]) ?? '',
-      name: traverseString(title, ["text"]) ?? '',
+      videoId: videoId,
+      name: titleText,
       artist: ArtistBasic(
-        name: traverseString(artist, ["text"]) ?? '',
-        artistId: traverseString(artist, ["browseId"]),
+        name: artistName,
+        artistId: artistId,
       ),
-      album: album != null
+      album: albumName != null
           ? AlbumBasic(
-              name: traverseString(album, ["text"]) ?? '',
-              albumId: traverseString(album, ["browseId"]) ?? '',
+              name: albumName,
+              albumId: albumId ?? '',
             )
           : null,
-      duration: Parser.parseDuration(duration?['text']),
+      duration: Parser.parseDuration(durationText),
       thumbnails: traverseList(item, ["thumbnails"])
           .map((item) => ThumbnailFull.fromMap(item))
           .toList(),
