@@ -162,11 +162,16 @@ class YTMusic {
       html = ytMusicHomeRawHtml!;
     } else {
       final cookies = await cookieJar.loadForRequest(uri);
-      final cookieString =
+      final jarCookieString =
           cookies.map((cookie) => '${cookie.name}=${cookie.value}').join('; ');
+      final effectiveCookies =
+          (_cookieString != null && _cookieString!.isNotEmpty)
+              ? _cookieString!
+              : jarCookieString;
       final headers = {..._baseHeaders};
-      if (cookieString.isNotEmpty) {
-        headers['cookie'] = cookieString;
+      if (effectiveCookies.isNotEmpty) {
+        headers['Cookie'] = effectiveCookies;
+        headers['cookie'] = effectiveCookies;
       }
       final response = await _client.get(uri, headers: headers);
 
@@ -265,6 +270,7 @@ class YTMusic {
     };
 
     if (effectiveCookies.isNotEmpty) {
+      headers['Cookie'] = effectiveCookies;
       headers['cookie'] = effectiveCookies;
     }
 
@@ -1365,8 +1371,16 @@ class YTMusic {
             await constructRequest("browse", body: {"browseId": feMusicHome});
 
         if (homeResponse != null) {
-          sections.addAll(
-              traverseList(homeResponse, ["sectionListRenderer", "contents"]));
+          final extracted =
+              traverseList(homeResponse, ["sectionListRenderer", "contents"]);
+          sections.addAll(extracted);
+          if (extracted.isEmpty) {
+            final direct = traverse(
+                homeResponse, ["tabRenderer", "sectionListRenderer", "contents"]);
+            if (direct is List) {
+              sections.addAll(direct);
+            }
+          }
         }
 
         // Follow continuation pages of feMusicHome to load all personalized shelves
